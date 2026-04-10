@@ -96,7 +96,7 @@ Example entity entry:
 | `competitive_position` | Leader / Strong player / Niche player / Adjacent / Early stage |
 | `relevance_score` | 1–5 |
 | `technology_focus` | What they actually build |
-| `plant_application` | Specific application in the configured domain |
+| `domain_application` | Specific application in the configured domain |
 | `funding_or_status` | Known funding, grants, or revenue status |
 | `notable_outputs` | Papers, patents, products |
 | `summary` | 2–3 sentence executive summary |

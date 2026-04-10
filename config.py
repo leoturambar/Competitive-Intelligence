@@ -80,7 +80,7 @@ OUTPUT_FIELDS = [
     "country",
     "founded_or_established",
     "technology_focus",     # 1-2 sentence description of their specific tech
-    "plant_application",    # What exactly they do with/for plants
+    "domain_application",    # What exactly they do with/for the domain
     "development_stage",    # Research | Prototype | Pilot | Commercial
     "funding_or_status",    # Funded by / revenue / grants known
     "key_people",           # Notable names if found
