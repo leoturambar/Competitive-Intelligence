@@ -6,7 +6,7 @@ formatted HTML report. Topic and entities fully configurable via `config.py`.
 
 ## What it does
 
-1. **Discovers** new entities automatically via DuckDuckGo + LLM (optional)
+1. **Discovers** new entities automatically via DuckDuckGo + regex affiliation extraction + LLM (optional)
 2. **Scrapes** company and research institute websites (with local caching)
 3. **Analyses** raw text with an LLM → structured JSON per entity
 4. **Enriches** three fields with targeted DDG searches: plant application, notable outputs, key people
@@ -55,12 +55,13 @@ Report saved to `data/reports/competitive_intelligence_<date>.html` — open dir
 ```
 competitive-intelligence/
 ├── config.py        # Topic, entities, LLM backend, output fields, delays
-├── scraper.py       # Fetch and clean text from entity URLs
+├── scraper.py       # Fetch and clean text from entity URLs, DDG fallback
 ├── analyzer.py      # LLM call per entity → structured JSON
 ├── enricher.py      # Targeted DDG passes for plant_application, outputs, people
-├── discoverer.py    # Auto-discover new entities via DDG + LLM
+├── discoverer.py    # Auto-discover new entities via DDG + regex + LLM
 ├── reporter.py      # JSON → formatted HTML report
 ├── main.py          # Entry point, orchestrates the pipeline
+├── test_discovery.py # Standalone test for the discovery pipeline
 ├── requirements.txt
 └── data/
     ├── raw/         # Cached scraped text (not tracked in git)
@@ -79,8 +80,23 @@ LLM_BACKEND = "ollama"   # local — uses Qwen2.5:14b via Ollama (default)
 LLM_BACKEND = "claude"   # API  — uses claude-sonnet via Anthropic
 ```
 
-Ollama is sufficient for structured extraction tasks (analyzer, enricher).
-Claude API gives better results on ambiguous or data-sparse entities.
+Ollama is sufficient for structured extraction tasks. Claude API gives
+more reliable results on ambiguous or data-sparse entities, particularly
+for the enrichment passes where hallucination risk is higher.
+
+## How discovery works
+
+For niche scientific topics, DuckDuckGo mostly returns academic papers rather
+than company pages. The discovery pipeline turns this into an advantage:
+
+1. DDG search with varied queries finds papers on the topic
+2. `_regex_affiliations()` extracts author affiliation strings directly from
+   the paper text — these are the real entities (research groups, labs, universities)
+3. The LLM classifies affiliations against the known entity list and returns new ones
+4. New entities feed into the normal scrape → analyze → enrich pipeline
+
+This approach finds groups that would never appear in a company directory
+but are active contributors to the field.
 
 ## Adapting to a new topic
 
@@ -89,7 +105,8 @@ All configuration lives in `config.py`. To analyse a different landscape:
 1. Update `TOPIC` and `TOPIC_DESCRIPTION`
 2. Replace `ENTITIES` with your list — each entry needs `name`, `urls`, and optionally `notes`
 3. Adjust `OUTPUT_FIELDS` if you want different extracted fields
-4. Run `python main.py --force` to start fresh
+4. Update `DISCOVERY_QUERIES` with topic-relevant search terms
+5. Run `python main.py --force` to start fresh
 
 Example entity entry:
 ```python
@@ -141,7 +158,11 @@ On subsequent runs, cached steps are skipped automatically.
 
 The tool uses DuckDuckGo's HTML interface for web searches (no API key required).
 DDG applies rate limiting on frequent requests. If you see connection errors or
-timeouts during enrichment or discovery, the tool will retry automatically.
+timeouts during enrichment or discovery, the tool retries automatically.
+
+DDG wraps result URLs in a redirect format — the tool decodes these automatically
+via `urllib.parse.unquote`. If DDG changes this format, update the `_ddg_links`
+function in `enricher.py` and `discoverer.py`.
 
 You can adjust scraping behaviour in `config.py`:
 ```python
@@ -150,6 +171,16 @@ DDG_DELAY     = 4.0   # seconds between DDG queries
 ```
 
 Increasing `DDG_DELAY` reduces the risk of IP-level rate limiting during long runs.
+
+## Output quality notes
+
+LLM output quality varies by entity. Entities with rich web presence (dedicated
+lab pages, published papers) produce reliable results. Entities with minimal
+online footprint may have sparse or inconsistent fields. All output should be
+reviewed before use — the tool is a research accelerator, not a source of truth.
+
+For higher reliability on enrichment fields, switch to `LLM_BACKEND = "claude"`
+in `config.py`.
 
 ## License
 
