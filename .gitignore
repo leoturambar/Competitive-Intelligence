@@ -7,6 +7,7 @@ __pycache__/
 # Data — cache e report non vanno in repo
 data/raw/
 data/analyzed/
+data/enriched/
 data/reports/
 
 # VSCodium / editor

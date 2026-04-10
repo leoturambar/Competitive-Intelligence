@@ -93,6 +93,7 @@ OUTPUT_FIELDS = [
 # ── Scraping settings ────────────────────────
 REQUEST_TIMEOUT   = 12      # seconds
 REQUEST_DELAY     = 1.5     # seconds between requests (be polite)
+DDG_DELAY         = 4.0     # seconds between DDG queries (rate limit protection)
 MAX_TEXT_CHARS    = 8000    # chars of scraped text passed to LLM per URL
 
 # ── Report settings ──────────────────────────
