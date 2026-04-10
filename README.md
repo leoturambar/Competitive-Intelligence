@@ -44,6 +44,19 @@ python main.py --skip-scrape     # use existing raw cache, re-analyze only
 
 Report saved to `data/reports/competitive_intelligence_<date>.html` — open directly in browser.
 
+## Caching
+
+Scraped text and LLM analysis are cached in `data/raw/` and `data/analyzed/`
+as JSON files. On subsequent runs the pipeline skips cached steps automatically.
+
+**When to force a refresh:**
+- `--force-scrape` — source websites have been updated
+- `--force-analyze` — you changed the prompt, output fields, or LLM backend
+- `--force` — you changed `TOPIC`, `TOPIC_DESCRIPTION`, or `ENTITIES` in `config.py`
+
+> **Note:** changing `config.py` does not automatically invalidate the cache.
+> Always run `python main.py --force` after changing topic or entities.
+
 ## Project structure
 
 ```
