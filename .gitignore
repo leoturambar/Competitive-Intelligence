@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Data — cache e report non vanno in repo
+data/raw/
+data/analyzed/
+data/reports/
+
+# VSCodium / editor
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# API keys (se mai messe in un .env locale)
+.env
+*.env
