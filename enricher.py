@@ -17,6 +17,7 @@ import re
 import random
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 import requests
 from bs4 import BeautifulSoup
@@ -34,9 +35,9 @@ UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
 
-ENRICHED_DIR = Path("data/enriched")
+ENRICHED_DIR      = Path("data/enriched")
 DDG_ENRICH_RESULTS = 2      # pages to fetch per DDG query
-DDG_MIN_CHARS     = 300     # min chars to consider DDG result useful
+DDG_MIN_CHARS      = 300    # min chars to consider DDG result useful
 
 
 # ── DDG helpers ───────────────────────────────
@@ -51,6 +52,13 @@ def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
         links = []
         for a in soup.select("a.result__a"):
             href = a.get("href", "")
+            # DDG wraps links as //duckduckgo.com/l/?uddg=<encoded_url>
+            if "uddg=" in href:
+                try:
+                    encoded = href.split("uddg=")[1].split("&")[0]
+                    href = unquote(encoded)
+                except Exception:
+                    continue
             if href.startswith("http"):
                 links.append(href)
             if len(links) >= max_results:
@@ -92,6 +100,33 @@ def _ddg_text(query: str) -> str:
     return combined[:MAX_TEXT_CHARS]
 
 
+def _shorten_query(name: str, topic: str) -> str:
+    """
+    Shorten a long entity name into a compact DDG-friendly query.
+    Removes generic words and keeps distinctive terms.
+    """
+    # Words to drop — too generic or too long to help DDG
+    stopwords = {
+        "college", "department", "of", "and", "the", "for",
+        "science", "technology", "institute", "division", "faculty",
+        "school", "center", "centre",
+    }
+    # Keep words from the name that are distinctive (>3 chars, not stopwords)
+    name_words = [
+        w for w in re.sub(r"[,\-—–]", " ", name).lower().split()
+        if w not in stopwords and len(w) > 3
+    ]
+    # Keep max 3 distinctive words from the name
+    name_part = " ".join(name_words[:3])
+    # Add 2-3 key topic words
+    topic_words = [
+        w for w in topic.lower().split()
+        if w not in stopwords and len(w) > 3
+    ][:3]
+    topic_part = " ".join(topic_words)
+    return f"{name_part} {topic_part}".strip()
+
+
 # ── Enrichment passes ─────────────────────────
 
 def _enrich_plant_application(name: str, existing: str, raw_text: str) -> str:
@@ -100,7 +135,7 @@ def _enrich_plant_application(name: str, existing: str, raw_text: str) -> str:
     Falls back to existing value if nothing better is found.
     """
     print(f"    [ENRICH] plant_application")
-    query   = f'"{name}" plant application organic electronics bioelectronics'
+    query = _shorten_query(name, TOPIC)
     ddg     = _ddg_text(query)
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
 
@@ -109,11 +144,11 @@ def _enrich_plant_application(name: str, existing: str, raw_text: str) -> str:
 
     prompt = f"""You are an expert in {TOPIC}.
 
-Given the text below about "{name}", extract a concise 1-2 sentence description 
-of how this entity applies organic electronics or bioelectronics specifically 
+Given the text below about "{name}", extract a concise 1-2 sentence description
+of how this entity applies organic electronics or bioelectronics specifically
 to living plants.
 
-Focus only on plant-specific applications (sensing, actuation, nutrient delivery, 
+Focus only on plant-specific applications (sensing, actuation, nutrient delivery,
 plant-machine interfaces). If no plant-specific application is found, return null.
 
 Text:
@@ -146,9 +181,9 @@ def _enrich_notable_outputs(name: str, existing: str, raw_text: str) -> str:
     """
     print(f"    [ENRICH] notable_outputs")
 
-    # Two targeted queries: publications and patents
-    q1 = f'"{name}" research paper publication journal'
-    q2 = f'"{name}" patent product technology'
+    short = _shorten_query(name, TOPIC)
+    q1 = f'{short} paper publication'
+    q2 = f'{short} patent product'
     ddg = _ddg_text(q1) + "\n\n" + _ddg_text(q2)
 
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
@@ -161,8 +196,8 @@ def _enrich_notable_outputs(name: str, existing: str, raw_text: str) -> str:
 Given the text below about "{name}", extract a list of notable outputs:
 papers, patents, products, datasets, or tools they have produced.
 
-For each item include: type (paper/patent/product/tool), title or name, 
-and year if available.
+For each item include: type (paper/patent/product/tool), title or name
+(use a short label of max 8 words, not a full sentence), and year if available.
 
 Return ONLY a JSON object:
 {{"notable_outputs": ["item 1", "item 2", ...] or null}}
@@ -183,7 +218,6 @@ Text:
         data = _parse_json(raw)
         val  = data.get("notable_outputs")
         if val and isinstance(val, list) and len(val) > 0:
-            # Clean out null/empty entries
             clean = [str(x).strip() for x in val
                      if x and str(x).lower() not in ("null", "none", "")]
             if clean:
@@ -198,15 +232,14 @@ Text:
 
 def _enrich_key_people(name: str, existing: str, raw_text: str, topic: str) -> str:
     """
-    Search DDG for researchers/PIs specifically working on the topic,
-    not just the most famous name associated with the organisation.
+    Search DDG for researchers/PIs specifically working on the topic.
+    Uses short name to avoid overly restrictive queries.
     """
     print(f"    [ENRICH] key_people")
 
-    # Estrai keyword corte dal nome (prime 2-3 parole significative)
-    short_name = name.split("—")[0].split("–")[0].strip()
-    q1 = f'{short_name} researcher principal investigator {topic}'
-    q2 = f'{short_name} team scientist lab plant bioelectronics'
+    short_name = _shorten_query(name, TOPIC)
+    q1 = f'{short_name} researcher principal investigator'
+    q2 = f'{short_name} team scientist lab'
     ddg = _ddg_text(q1) + "\n\n" + _ddg_text(q2)
 
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
@@ -216,17 +249,17 @@ def _enrich_key_people(name: str, existing: str, raw_text: str, topic: str) -> s
 
     prompt = f"""You are an expert in {TOPIC}.
 
-Given the text below about "{name}", extract the names of key researchers, 
+Given the text below about "{name}", extract the names of key researchers,
 principal investigators, or team members who work specifically on {topic}.
 
-Important: prefer researchers directly involved in the specific topic 
+Important: prefer researchers directly involved in the specific topic
 ("{topic}") over general directors or administrators of the organisation.
 Include both senior PIs and notable junior researchers if mentioned.
 
 Return ONLY a JSON object:
 {{"key_people": ["Name 1 (role if known)", "Name 2 (role if known)", ...] or null}}
 
-Maximum 4 people. 
+Maximum 4 people.
 
 Only include people explicitly named in the text. Do NOT invent or guess names.
 
@@ -278,35 +311,31 @@ def enrich_all(analyzed: dict, force: bool = False) -> dict:
 
         print(f"  [ENRICH] {name}")
 
-        # Load raw scraped text for additional context
         raw_path = Path("data/raw") / f"{slug}.json"
         raw_text = ""
         if raw_path.exists():
             with open(raw_path) as f:
                 raw_text = json.load(f).get("text", "")
 
-        enriched = dict(data)  # start from analyzed copy
+        enriched = dict(data)
 
-        # Pass 1: plant_application
         enriched["plant_application"] = _enrich_plant_application(
             name,
-            existing  = str(data.get("plant_application") or ""),
-            raw_text  = raw_text,
+            existing = str(data.get("plant_application") or ""),
+            raw_text = raw_text,
         )
 
-        # Pass 2: notable_outputs
         enriched["notable_outputs"] = _enrich_notable_outputs(
             name,
-            existing  = str(data.get("notable_outputs") or ""),
-            raw_text  = raw_text,
+            existing = str(data.get("notable_outputs") or ""),
+            raw_text = raw_text,
         )
 
-        # Pass 3: key_people
         enriched["key_people"] = _enrich_key_people(
             name,
-            existing  = str(data.get("key_people") or ""),
-            raw_text  = raw_text,
-            topic     = TOPIC,
+            existing = str(data.get("key_people") or ""),
+            raw_text = raw_text,
+            topic    = TOPIC,
         )
 
         with open(cache, "w") as f:

@@ -5,10 +5,9 @@ __pycache__/
 .env
 
 # Data — cache e report non vanno in repo
-data/raw/
-data/analyzed/
-data/enriched/
-data/reports/
+data/
+# Report di esempio può andare in repo
+!data/reports/example_report.html
 
 # VSCodium / editor
 .vscode/

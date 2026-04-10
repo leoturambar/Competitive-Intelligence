@@ -23,7 +23,7 @@ TOPIC_DESCRIPTION = (
 ENTITIES = [
     {
         "name": "Linköping University — Laboratory of Organic Electronics",
-        "urls": ["https://liu.se/en/research/organic-electronics"],
+        "urls": ["https://liu.se/en/research/laboratory-of-organic-electronics/electronic-plants"],
         "notes": "Pioneer group (Magnus Berggren). Electronic plants, PEDOT:PSS in xylem."
     },
     {
@@ -59,16 +59,16 @@ ENTITIES = [
     {
         "name": "Emili (Electronic Medicine in Living systems)",
         "urls": ["https://emili.eu"],
-        "notes": "EU-funded consortium. Organic electronics for living systems, plant component."
+        "notes": "EU-funded research consortium, not a company. Organic electronics for living systems, plant component."
     },
     {
         "name": "Wageningen University — Plant Sciences Group",
-        "urls": ["https://www.wur.nl/en/research-results/research-institutes/plant-research.htm"],
+        "urls": ["https://www.wur.nl/en/research/plant"],
         "notes": "Academic. Active in plant electrophysiology and biosensing."
     },
     {
         "name": "Cornell University — Bioelectronics Lab",
-        "urls": ["https://bioelectronics.cornell.edu"],
+        "urls": ["https://cals.cornell.edu/biological-environmental-engineering/research","https://cropps.cornell.edu/"],
         "notes": "US academic. Organic bioelectronics incl. plant interfaces."
     },
 ]
