@@ -6,9 +6,11 @@ formatted HTML report. Topic and entities fully configurable via `config.py`.
 
 ## What it does
 
-1. **Scrapes** company and research institute websites (with local caching)
-2. **Analyses** raw text with an LLM → structured JSON per entity
-3. **Generates** a clean HTML report sorted by relevance
+1. **Discovers** new entities automatically via DuckDuckGo + LLM (optional)
+2. **Scrapes** company and research institute websites (with local caching)
+3. **Analyses** raw text with an LLM → structured JSON per entity
+4. **Enriches** three fields with targeted DDG searches: plant application, notable outputs, key people
+5. **Generates** a clean HTML report sorted by relevance
 
 ## Stack
 
@@ -35,41 +37,36 @@ Reopen the terminal after running `setx`.
 ## Usage
 
 ```bash
-python main.py                   # run with cache
-python main.py --force-scrape    # re-scrape all sources
-python main.py --force-analyze   # re-run LLM analysis
-python main.py --force           # full fresh run
-python main.py --skip-scrape     # use existing raw cache, re-analyze only
+python main.py                    # run with cache
+python main.py --discover         # also auto-discover new entities
+python main.py --force-scrape     # re-scrape all sources
+python main.py --force-analyze    # re-run LLM analysis
+python main.py --force-enrich     # re-run enrichment passes only
+python main.py --skip-scrape      # use existing raw cache, re-analyze
+python main.py --skip-enrich      # skip enrichment, go straight to report
+python main.py --force            # full fresh run (all steps)
+python main.py --force --discover # full fresh run + discovery
 ```
 
 Report saved to `data/reports/competitive_intelligence_<date>.html` — open directly in browser.
-
-## Caching
-
-Scraped text and LLM analysis are cached in `data/raw/` and `data/analyzed/`
-as JSON files. On subsequent runs the pipeline skips cached steps automatically.
-
-**When to force a refresh:**
-- `--force-scrape` — source websites have been updated
-- `--force-analyze` — you changed the prompt, output fields, or LLM backend
-- `--force` — you changed `TOPIC`, `TOPIC_DESCRIPTION`, or `ENTITIES` in `config.py`
-
-> **Note:** changing `config.py` does not automatically invalidate the cache.
-> Always run `python main.py --force` after changing topic or entities.
 
 ## Project structure
 
 ```
 competitive-intelligence/
-├── config.py        # Topic, entities, LLM backend, output fields
+├── config.py        # Topic, entities, LLM backend, output fields, delays
 ├── scraper.py       # Fetch and clean text from entity URLs
 ├── analyzer.py      # LLM call per entity → structured JSON
+├── enricher.py      # Targeted DDG passes for plant_application, outputs, people
+├── discoverer.py    # Auto-discover new entities via DDG + LLM
 ├── reporter.py      # JSON → formatted HTML report
 ├── main.py          # Entry point, orchestrates the pipeline
 ├── requirements.txt
 └── data/
     ├── raw/         # Cached scraped text (not tracked in git)
     ├── analyzed/    # Cached LLM output (not tracked in git)
+    ├── enriched/    # Cached enrichment output (not tracked in git)
+    ├── discovered/  # Cached discovery results (not tracked in git)
     └── reports/     # Generated HTML reports (not tracked in git)
 ```
 
@@ -78,9 +75,12 @@ competitive-intelligence/
 Two options, selectable in `config.py`:
 
 ```python
-LLM_BACKEND = "ollama"   # local — uses Qwen2.5:14b via Ollama
-LLM_BACKEND = "claude"   # API — uses claude-sonnet via Anthropic
+LLM_BACKEND = "ollama"   # local — uses Qwen2.5:14b via Ollama (default)
+LLM_BACKEND = "claude"   # API  — uses claude-sonnet via Anthropic
 ```
+
+Ollama is sufficient for structured extraction tasks (analyzer, enricher).
+Claude API gives better results on ambiguous or data-sparse entities.
 
 ## Adapting to a new topic
 
@@ -100,7 +100,29 @@ Example entity entry:
 }
 ```
 
-## Output fields (default)
+> **Note:** changing `config.py` does not automatically invalidate the cache.
+> Always run `python main.py --force` after changing topic or entities.
+
+## Caching
+
+Each pipeline step caches its output as JSON files:
+
+| Step | Cache location |
+|---|---|
+| Scraping | `data/raw/<slug>.json` |
+| Analysis | `data/analyzed/<slug>.json` |
+| Enrichment | `data/enriched/<slug>.json` |
+| Discovery | `data/discovered.json` |
+
+On subsequent runs, cached steps are skipped automatically.
+
+**When to force a refresh:**
+- `--force-scrape` — source websites have been updated
+- `--force-analyze` — you changed the prompt, output fields, or LLM backend
+- `--force-enrich` — you changed enrichment queries or prompts
+- `--force` — you changed `TOPIC`, `TOPIC_DESCRIPTION`, or `ENTITIES`
+
+## Output fields
 
 | Field | Description |
 |---|---|
@@ -108,11 +130,26 @@ Example entity entry:
 | `development_stage` | Research / Prototype / Pilot / Commercial |
 | `competitive_position` | Leader / Strong player / Niche player / Adjacent / Early stage |
 | `relevance_score` | 1–5 |
-| `technology_focus` | What they actually build |
-| `domain_application` | Specific application in the configured domain |
+| `technology_focus` | What they build |
+| `plant_application` | Specific application in the configured domain (enriched) |
 | `funding_or_status` | Known funding, grants, or revenue status |
-| `notable_outputs` | Papers, patents, products |
+| `key_people` | Researchers / PIs working on the topic (enriched) |
+| `notable_outputs` | Papers, patents, products (enriched) |
 | `summary` | 2–3 sentence executive summary |
+
+## Notes on DuckDuckGo scraping
+
+The tool uses DuckDuckGo's HTML interface for web searches (no API key required).
+DDG applies rate limiting on frequent requests. If you see connection errors or
+timeouts during enrichment or discovery, the tool will retry automatically.
+
+You can adjust scraping behaviour in `config.py`:
+```python
+REQUEST_DELAY = 1.5   # seconds between page fetches
+DDG_DELAY     = 4.0   # seconds between DDG queries
+```
+
+Increasing `DDG_DELAY` reduces the risk of IP-level rate limiting during long runs.
 
 ## License
 

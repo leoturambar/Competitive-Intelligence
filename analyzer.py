@@ -100,6 +100,9 @@ def _parse_json(raw: str) -> dict:
     """Extract JSON from LLM response, tolerating minor formatting issues."""
     # Strip potential markdown fences
     raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+    # Qwen sometimes returns bare "null" when it has nothing to say
+    if raw.strip().lower() == "null":
+        return {}
     # Find first { ... } block
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
