@@ -40,9 +40,39 @@ def apply_csv(csv_path: str):
         config.TOPIC_DESCRIPTION = data["description"]
     if data["entities"]:
         config.ENTITIES = data["entities"]
-
+    if data.get("discovery_queries"):
+        config.DISCOVERY_QUERIES = data["discovery_queries"]
+    if data.get("topic_keywords"):
+        config.TOPIC_KEYWORDS = data["topic_keywords"]
+    if data.get("domain_label"):
+        config.DOMAIN_LABEL = data["domain_label"]
     config.REPORT_SUBTITLE = data["topic"].title()
     return data["slug"]
+
+
+def _offer_save_to_csv(new_entities: list, csv_slug: str | None):
+    """
+    Ask user whether to save discovered entities back to CSV.
+    Called from command line only — UI handles this separately.
+    """
+    if not new_entities:
+        return
+    print(f"\n{'─'*56}")
+    print(f"  {len(new_entities)} new entities were discovered.")
+    print(f"  Save them to the entity CSV for future runs? (y/n): ", end="", flush=True)
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        return
+    if answer != "y":
+        print("  Skipped.")
+        return
+
+    from csv_loader import save_discovered_to_csv
+    target = f"data/input/{csv_slug}.csv" if csv_slug else None
+    saved_path = save_discovered_to_csv(new_entities, target)
+    print(f"  Saved -> {saved_path}")
+    print(f"{'─'*56}\n")
 
 
 def run(
@@ -69,10 +99,17 @@ def run(
         print("[STEP 0] Discovering new entities...")
         _write_status("discovery", "searching DuckDuckGo...")
         from discoverer import discover as run_discovery
-        extra_entities = run_discovery(force=force_discover)
+        extra_entities = run_discovery(
+            force=force_discover,
+            on_status=lambda step, detail: _write_status(step, detail)
+        )
         msg = f"{len(extra_entities)} new entities found"
         print(f"         -> {msg}\n")
         _write_status("discovery", msg, done=True)
+
+    if extra_entities:
+        with open("data/run_discovered.json", "w", encoding="utf-8") as f:
+            json.dump(extra_entities, f)
 
     # ── Step 1: Scrape ──────────────────────────────────
     if skip_scrape:
@@ -124,6 +161,10 @@ def run(
     print(f"  ✓ Report ready: {path}")
     print(f"{'='*56}\n")
     _write_status("done", msg, done=True)
+
+    # ── Step 5: Save discovered entities to CSV (if any) ──
+    if extra_entities and discover:
+        _offer_save_to_csv(extra_entities, csv_slug)
     return path
 
 

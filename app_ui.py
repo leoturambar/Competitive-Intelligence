@@ -14,14 +14,12 @@ from pathlib import Path
 
 import streamlit as st
 
-# ── Page config ───────────────────────────────
 st.set_page_config(
     page_title="Competitive Intelligence Tool",
     page_icon="🔬",
     layout="centered",
 )
 
-# ── Custom CSS ────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -46,36 +44,32 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
     text-transform: uppercase; letter-spacing: 2px;
     color: #6c757d; margin-bottom: 0.8rem; margin-top: 1.5rem;
 }
-
-/* Milestone panel */
 .milestone-panel {
     background: #f8f9fa;
     border: 1px solid #e0e4e8;
     border-radius: 8px;
-    padding: 1rem 1.2rem;
-    margin-top: 1rem;
+    padding: 0.6rem 1.2rem;
+    margin-top: 0.5rem;
 }
-.milestone-row {
+.ms-row {
     display: flex;
     align-items: center;
-    gap: 0.7rem;
-    padding: 0.4rem 0;
-    font-size: 0.88rem;
+    gap: 0.75rem;
+    padding: 0.45rem 0;
+    font-size: 0.87rem;
     border-bottom: 1px solid #f0f0f0;
 }
-.milestone-row:last-child { border-bottom: none; }
-.ms-icon { font-size: 1rem; width: 1.4rem; text-align: center; }
-.ms-step { font-weight: 600; color: #0d4f7c; min-width: 90px; }
-.ms-detail { color: #6c757d; font-family: 'DM Mono', monospace; font-size: 0.78rem; }
-.ms-pending .ms-icon::before { content: "○"; color: #aaa; }
-.ms-running .ms-icon::before { content: "◉"; color: #1a6fa8; }
-.ms-done    .ms-icon::before { content: "●"; color: #1e8449; }
-.ms-skip    .ms-icon::before { content: "—"; color: #aaa; }
-.ms-error   .ms-icon::before { content: "✗"; color: #c0392b; }
+.ms-row:last-child { border-bottom: none; }
+.ms-bullet { font-size: 0.7rem; width: 1rem; text-align: center; flex-shrink: 0; }
+.ms-label  { font-weight: 600; color: #0d4f7c; min-width: 100px; }
+.ms-detail { color: #6c757d; font-family: 'DM Mono', monospace; font-size: 0.76rem; }
+.ms-pending .ms-bullet { color: #c8d0d8; }
+.ms-running .ms-bullet { color: #1a6fa8; }
+.ms-done    .ms-bullet { color: #1e8449; }
+.ms-error   .ms-bullet { color: #c0392b; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Header ────────────────────────────────────
 st.markdown("""
 <div class="ci-header">
   <p class="ci-title">&#x1F52C; Competitive Intelligence Tool</p>
@@ -85,12 +79,12 @@ st.markdown("""
 
 
 # ── Helpers ───────────────────────────────────
-def get_csv_files() -> list:
+def get_csv_files():
     d = Path("data/input")
     return sorted(d.glob("*.csv")) if d.exists() else []
 
 
-def find_latest_report() -> Path | None:
+def find_latest_report():
     d = Path("data/reports")
     if not d.exists():
         return None
@@ -101,69 +95,66 @@ def find_latest_report() -> Path | None:
 def read_status() -> dict:
     p = Path("data/run_status.json")
     if not p.exists():
-        return {}
+        return {"current": {}, "history": {}}
     try:
         with open(p, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Support both old (flat) and new (nested) format
+        if "current" not in data:
+            return {"current": data, "history": {}}
+        return data
     except Exception:
-        return {}
+        return {"current": {}, "history": {}}
 
 
-def render_milestones(steps_config: list, current_status: dict):
+def render_milestones(steps: list, status: dict):
     """
-    steps_config: list of (key, label) tuples defining expected steps.
-    current_status: dict from run_status.json
+    steps: list of (key, label) for this run configuration.
+    status: {"current": {...}, "history": {"step_key": "detail", ...}}
     """
-    current_step = current_status.get("step", "")
-    is_done      = current_status.get("done", False)
-    is_error     = current_status.get("error", False)
-    detail       = current_status.get("detail", "")
+    current  = status.get("current", {})
+    history  = status.get("history", {})
+    cur_step = current.get("step", "")
+    is_error = current.get("error", False)
+    all_done = cur_step == "done"
 
-    rows_html = ""
-    reached = False
-
-    for key, label in steps_config:
-        if key == current_step:
-            reached = True
+    rows = ""
+    for key, label in steps:
+        if all_done or key in history:
+            # Completed step — show stored detail
+            detail = history.get(key, "")
+            css, bullet = "ms-done", "&#x25CF;"
+        elif key == cur_step:
+            detail = current.get("detail", "running...")
             if is_error:
-                css = "ms-error"
-                icon_detail = detail
-            elif is_done:
-                css = "ms-done"
-                icon_detail = detail
+                css, bullet = "ms-error", "&#x2717;"
             else:
-                css = "ms-running"
-                icon_detail = detail or "running..."
-        elif not reached:
-            # Steps before current — check if they appear as done in history
-            css = "ms-done"
-            icon_detail = ""
+                css, bullet = "ms-running", "&#x25C9;"
         else:
-            css = "ms-pending"
-            icon_detail = ""
+            detail, css, bullet = "", "ms-pending", "&#x25CB;"
 
-        rows_html += f"""
-        <div class="milestone-row {css}">
-          <span class="ms-icon"></span>
-          <span class="ms-step">{label}</span>
-          <span class="ms-detail">{icon_detail}</span>
-        </div>"""
+        rows += (
+            f'<div class="ms-row {css}">'
+            f'  <span class="ms-bullet">{bullet}</span>'
+            f'  <span class="ms-label">{label}</span>'
+            f'  <span class="ms-detail">{detail}</span>'
+            f'</div>'
+        )
 
-    if current_step == "done":
-        # All done
-        rows_html = ""
-        for key, label in steps_config:
-            rows_html += f"""
-            <div class="milestone-row ms-done">
-              <span class="ms-icon"></span>
-              <span class="ms-step">{label}</span>
-              <span class="ms-detail"></span>
-            </div>"""
+    st.markdown(f'<div class="milestone-panel">{rows}</div>', unsafe_allow_html=True)
 
-    st.markdown(
-        f'<div class="milestone-panel">{rows_html}</div>',
-        unsafe_allow_html=True,
-    )
+
+def get_steps(do_discover, skip_scrape, skip_enrich) -> list:
+    steps = []
+    if do_discover:
+        steps.append(("discovery",  "Discovery"))
+    if not skip_scrape:
+        steps.append(("scraping",   "Scraping"))
+    steps.append(("analysis",   "Analysis"))
+    if not skip_enrich:
+        steps.append(("enrichment", "Enrichment"))
+    steps.append(("report",     "Report"))
+    return steps
 
 
 # ── Section 1: Input ─────────────────────────
@@ -204,9 +195,9 @@ with col1:
     do_scrape  = st.checkbox("Scrape",  value=True, help="Fetch entity pages")
     do_analyze = st.checkbox("Analyze", value=True, help="LLM structured extraction")
 with col2:
-    do_enrich  = st.checkbox("Enrich", value=True,
+    do_enrich  = st.checkbox("Enrich",  value=True,
                               help="DDG passes for outputs, people, application")
-    _do_report = st.checkbox("Report", value=True, help="Generate HTML report")
+    _do_report = st.checkbox("Report",  value=True, help="Generate HTML report")
 
 
 # ── Section 4: Options ────────────────────────
@@ -240,7 +231,7 @@ if not do_discover:
     force_discover = False
 
 if force_discover and not force_all:
-    st.info("Force re-discover detected — skip scraping has been disabled automatically.")
+    st.info("Force re-discover: skip scraping has been disabled automatically.")
 
 
 # ── Build command ─────────────────────────────
@@ -267,20 +258,6 @@ def build_command(selected_csv, csv_options, do_scrape, skip_scrape,
     return cmd
 
 
-# ── Milestone step definitions ────────────────
-def get_steps(do_discover, skip_scrape, skip_enrich) -> list:
-    steps = []
-    if do_discover:
-        steps.append(("discovery", "Discovery"))
-    if not skip_scrape:
-        steps.append(("scraping", "Scraping"))
-    steps.append(("analysis", "Analysis"))
-    if not skip_enrich:
-        steps.append(("enrichment", "Enrichment"))
-    steps.append(("report", "Report"))
-    return steps
-
-
 # ── Run section ───────────────────────────────
 st.markdown('<p class="section-label">Run</p>', unsafe_allow_html=True)
 
@@ -293,23 +270,18 @@ st.code(cmd_preview, language="bash")
 run_clicked = st.button("▶  Run analysis", type="primary", use_container_width=True)
 
 # ── Session state ─────────────────────────────
-for key, default in [
-    ("running",     False),
-    ("last_report", None),
-    ("process_pid", None),
-]:
+for key, default in [("running", False), ("last_report", None), ("last_discovered", [])]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 status_placeholder = st.empty()
-report_placeholder = st.empty()
+
 
 # ── Launch ────────────────────────────────────
 if run_clicked and not st.session_state.running:
-    # Clear old status file
-    status_path = Path("data/run_status.json")
-    if status_path.exists():
-        status_path.unlink()
+    p = Path("data/run_status.json")
+    if p.exists():
+        p.unlink()
 
     st.session_state.running     = True
     st.session_state.last_report = None
@@ -318,48 +290,52 @@ if run_clicked and not st.session_state.running:
         selected_csv, csv_options, do_scrape, skip_scrape,
         do_enrich, do_discover, force_discover, force_all,
     )
-
     env = os.environ.copy()
-    env["CI_LLM_BACKEND"]    = llm_backend
-    env["PYTHONIOENCODING"]  = "utf-8"
+    env["CI_LLM_BACKEND"]   = llm_backend
+    env["PYTHONIOENCODING"] = "utf-8"
 
-    process = subprocess.Popen(cmd, env=env)
-    st.session_state.process_pid = process.pid
+    subprocess.Popen(cmd, env=env)
     st.rerun()
 
 
-# ── Poll while running ────────────────────────
+# ── Poll ──────────────────────────────────────
+steps = get_steps(do_discover, skip_scrape, not do_enrich)
+
 if st.session_state.running:
-    steps = get_steps(do_discover, skip_scrape, not do_enrich)
     status = read_status()
+    current = status.get("current", {})
 
     with status_placeholder.container():
         st.markdown('<p class="section-label">Progress</p>', unsafe_allow_html=True)
         render_milestones(steps, status)
 
-    current_step = status.get("step", "")
-    is_done      = status.get("done", False)
-    is_error     = status.get("error", False)
-
-    if current_step == "done" and is_done:
+    if current.get("step") == "done" and current.get("done"):
         st.session_state.running     = False
         st.session_state.last_report = find_latest_report()
+        disc_path = Path("data/run_discovered.json")
+        if disc_path.exists():
+            try:
+                with open(disc_path, encoding="utf-8") as f:
+                    st.session_state.last_discovered = json.load(f)
+                disc_path.unlink()
+            except Exception:
+                pass
         st.rerun()
-    elif is_error:
+    elif current.get("error"):
         st.session_state.running = False
-        st.error(f"Run failed: {status.get('detail', '')}")
+        st.error(f"Run failed: {current.get('detail', '')}")
         st.rerun()
     else:
         time.sleep(1.5)
         st.rerun()
 
-elif st.session_state.last_report is None:
-    # Show last status if available (from a previous run)
+else:
+    # Show status from last run if available
     status = read_status()
-    if status:
-        steps = get_steps(do_discover, skip_scrape, not do_enrich)
+    if status.get("current") or status.get("history"):
         with status_placeholder.container():
-            st.markdown('<p class="section-label">Last run</p>', unsafe_allow_html=True)
+            label = "Last run" if not st.session_state.running else "Progress"
+            st.markdown(f'<p class="section-label">{label}</p>', unsafe_allow_html=True)
             render_milestones(steps, status)
 
 
@@ -369,3 +345,19 @@ if st.session_state.last_report:
     st.success(f"Report ready: `{report_path.name}`")
     if st.button("&#x1F4C4;  Open report in browser"):
         webbrowser.open(report_path.resolve().as_uri())
+
+
+# ── Save discovered entities ──────────────────
+if st.session_state.get("last_discovered"):
+    st.markdown('<p class="section-label">New entities discovered</p>',
+                unsafe_allow_html=True)
+    discovered = st.session_state.last_discovered
+    st.info(f"{len(discovered)} new entities found. Save to CSV for future runs?")
+    for e in discovered:
+        st.caption(f"• {e['name']}")
+    if st.button("💾  Save to CSV"):
+        from csv_loader import save_discovered_to_csv
+        target = selected_csv if selected_csv != csv_options[0] else None
+        path = save_discovered_to_csv(discovered, target)
+        st.success(f"Saved -> {path}")
+        st.session_state.last_discovered = []
