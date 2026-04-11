@@ -23,7 +23,7 @@ TOPIC_DESCRIPTION = (
 ENTITIES = [
     {
         "name": "Linköping University — Laboratory of Organic Electronics",
-        "urls": ["https://liu.se/en/research/laboratory-of-organic-electronics/electronic-plants"],
+        "urls": ["https://liu.se/en/research/organic-electronics"],
         "notes": "Pioneer group (Magnus Berggren). Electronic plants, PEDOT:PSS in xylem."
     },
     {
@@ -59,16 +59,16 @@ ENTITIES = [
     {
         "name": "Emili (Electronic Medicine in Living systems)",
         "urls": ["https://emili.eu"],
-        "notes": "EU-funded research consortium, not a company. Organic electronics for living systems, plant component."
+        "notes": "EU-funded consortium. Organic electronics for living systems, plant component."
     },
     {
         "name": "Wageningen University — Plant Sciences Group",
-        "urls": ["https://www.wur.nl/en/research/plant"],
+        "urls": ["https://www.wur.nl/en/research-results/research-institutes/plant-research.htm"],
         "notes": "Academic. Active in plant electrophysiology and biosensing."
     },
     {
         "name": "Cornell University — Bioelectronics Lab",
-        "urls": ["https://cals.cornell.edu/biological-environmental-engineering/research","https://cropps.cornell.edu/"],
+        "urls": ["https://bioelectronics.cornell.edu"],
         "notes": "US academic. Organic bioelectronics incl. plant interfaces."
     },
 ]
@@ -80,13 +80,13 @@ OUTPUT_FIELDS = [
     "country",
     "founded_or_established",
     "technology_focus",     # 1-2 sentence description of their specific tech
-    "domain_application",    # What exactly they do with/for the domain
+    "domain_application",   # What exactly they do within the domain
     "development_stage",    # Research | Prototype | Pilot | Commercial
     "funding_or_status",    # Funded by / revenue / grants known
     "key_people",           # Notable names if found
     "notable_outputs",      # Papers, patents, products
     "competitive_position", # LLM assessment: leader / follower / niche / adjacent
-    "relevance_score",      # 1-5: how central to organic bioelectronics for plants
+    "relevance_score",      # 1-5: how central to the topic
     "summary",              # 2-3 sentence executive summary
 ]
 
@@ -97,8 +97,27 @@ DDG_DELAY         = 4.0     # seconds between DDG queries (rate limit protection
 MAX_TEXT_CHARS    = 8000    # chars of scraped text passed to LLM per URL
 
 # ── Report settings ──────────────────────────
-REPORT_TITLE  = "Competitive Intelligence Report"
+REPORT_TITLE    = "Competitive Intelligence Report"
 REPORT_SUBTITLE = "Organic Bioelectronics for Plants"
+DOMAIN_LABEL    = "Plant application"   # Label for domain_application field in report
+
+# ── Discovery settings ───────────────────────
+# Search queries for DDG discovery (overridable via CSV #discovery_queries)
+DISCOVERY_QUERIES = [
+    "plant bioelectronics company startup",
+    "electronic plants research lab university",
+    "organic electronics plant sensing",
+    "OECT plant interface research",
+    "conducting polymer plant bioelectronics lab",
+]
+
+# Keywords to verify that a discovered entity is relevant (overridable via CSV #topic_keywords)
+# A candidate page must contain at least 2 of these to be accepted
+TOPIC_KEYWORDS = [
+    "bioelectron", "organic electron", "OECT", "plant",
+    "conducting polymer", "electrochemical transistor",
+    "phytl", "xylem", "biosensor", "electrophysiol", "biohybrid",
+]
 
 # ── Allow override via environment variable (used by Streamlit UI) ────
 import os as _os
