@@ -130,11 +130,7 @@ def save_discovered_to_csv(new_entities: list, csv_path: str | None = None) -> s
     else:
         with open(p, "w", encoding="utf-8", newline="") as f:
             writer = _csv.writer(f)
-            try:
-                existing = load_csv(csv_path)
-                f.write(f"#topic,{existing.get('topic', '')}\n")
-            except Exception:
-                f.write("#topic,\n")
+            f.write("#topic,\n")
             f.write("#description,Auto-generated from discovery\n")
             writer.writerow(["name", "url", "notes"])
             for e in new_entities:

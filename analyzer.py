@@ -9,20 +9,17 @@ from pathlib import Path
 
 import requests
 
-from config import (
-    LLM_BACKEND, OLLAMA_MODEL, CLAUDE_MODEL, CLAUDE_API_KEY,
-    TOPIC, TOPIC_DESCRIPTION, OUTPUT_FIELDS,
-)
+import config
 
 ANALYZED_DIR = Path("data/analyzed")
 
 
 def _build_prompt(entity_name: str, raw_text: str) -> str:
-    fields_list = "\n".join(f'  - "{f}"' for f in OUTPUT_FIELDS)
-    return f"""You are an expert analyst in {TOPIC}.
+    fields_list = "\n".join(f'  - "{f}"' for f in config.OUTPUT_FIELDS)
+    return f"""You are an expert analyst in {config.TOPIC}.
 
 Context about the landscape you are mapping:
-{TOPIC_DESCRIPTION}
+{config.TOPIC_DESCRIPTION}
 
 You will be given raw text scraped from the web about one specific entity.
 Your task: extract structured information and return ONLY a valid JSON object.
@@ -53,7 +50,7 @@ Rules:
 def _call_ollama(prompt: str) -> str:
     resp = requests.post(
         "http://localhost:11434/api/generate",
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+        json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": False},
         timeout=120,
     )
     resp.raise_for_status()
@@ -63,7 +60,7 @@ def _call_ollama(prompt: str) -> str:
 # ── Claude backend ────────────────────────────
 
 def _call_claude(prompt: str) -> str:
-    api_key = CLAUDE_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = config.CLAUDE_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise ValueError("Claude API key not set. Set CLAUDE_API_KEY in config.py or ANTHROPIC_API_KEY env var.")
 
@@ -75,7 +72,7 @@ def _call_claude(prompt: str) -> str:
             "content-type": "application/json",
         },
         json={
-            "model": CLAUDE_MODEL,
+            "model": config.CLAUDE_MODEL,
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": prompt}],
         },
@@ -88,12 +85,12 @@ def _call_claude(prompt: str) -> str:
 # ── Dispatcher ────────────────────────────────
 
 def _call_llm(prompt: str) -> str:
-    if LLM_BACKEND == "ollama":
+    if config.LLM_BACKEND == "ollama":
         return _call_ollama(prompt)
-    elif LLM_BACKEND == "claude":
+    elif config.LLM_BACKEND == "claude":
         return _call_claude(prompt)
     else:
-        raise ValueError(f"Unknown LLM_BACKEND: {LLM_BACKEND}")
+        raise ValueError(f"Unknown LLM_BACKEND: {config.LLM_BACKEND}")
 
 
 def _parse_json(raw: str) -> dict:
@@ -138,7 +135,7 @@ def analyze_all(scraped: dict, force: bool = False) -> dict:
                 results[name] = json.load(f)
             continue
 
-        print(f"  [ANALYZE] {name}  (backend: {LLM_BACKEND})")
+        print(f"  [ANALYZE] {name}  (backend: {config.LLM_BACKEND})")
 
         raw_text = data.get("text", "")
         if not raw_text.strip():
@@ -153,7 +150,7 @@ def analyze_all(scraped: dict, force: bool = False) -> dict:
                 structured["entity_name"] = name
             except Exception as e:
                 print(f"    [ERROR] LLM failed for {name}: {e}")
-                structured = {f: None for f in OUTPUT_FIELDS}
+                structured = {f: None for f in config.OUTPUT_FIELDS}
                 structured["entity_name"] = name
                 structured["summary"] = f"Analysis failed: {e}"
 

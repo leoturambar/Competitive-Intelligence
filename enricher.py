@@ -27,10 +27,7 @@ from urllib.parse import unquote, quote
 import requests
 from bs4 import BeautifulSoup
 
-from config import (
-    LLM_BACKEND, TOPIC,
-    REQUEST_TIMEOUT, REQUEST_DELAY, MAX_TEXT_CHARS, DDG_DELAY
-)
+import config
 from analyzer import _call_llm, _parse_json
 
 UA_LIST = [
@@ -51,7 +48,7 @@ def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
     url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
     headers = {"User-Agent": random.choice(UA_LIST)}
     try:
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT)
         soup = BeautifulSoup(resp.text, "html.parser")
         links = []
         for a in soup.select("a.result__a"):
@@ -66,7 +63,7 @@ def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
                 links.append(href)
             if len(links) >= max_results:
                 break
-        time.sleep(DDG_DELAY)
+        time.sleep(config.DDG_DELAY)
         return links
     except Exception as e:
         print(f"      [WARN] DDG query failed: {e}")
@@ -76,7 +73,7 @@ def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
 def _fetch_text(url: str) -> str:
     headers = {"User-Agent": random.choice(UA_LIST)}
     try:
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header",
@@ -97,8 +94,8 @@ def _ddg_text(query: str) -> str:
         text = _fetch_text(url)
         if text:
             combined += f"\n\n[Source: {url}]\n{text}"
-        time.sleep(REQUEST_DELAY)
-    return combined[:MAX_TEXT_CHARS]
+        time.sleep(config.REQUEST_DELAY)
+    return combined[:config.MAX_TEXT_CHARS]
 
 
 def _shorten_query(name: str, topic: str) -> str:
@@ -182,15 +179,15 @@ def _resolve_output_url(item: dict) -> str | None:
 # ── Enrichment passes ─────────────────────────
 
 def _enrich_plant_application(name: str, existing: str, raw_text: str) -> str:
-    print(f"    [ENRICH] plant_application")
-    short = _shorten_query(name, TOPIC)
+    print(f"    [ENRICH] domain_application")
+    short = _shorten_query(name, config.TOPIC)
     ddg   = _ddg_text(f"{short} plant application")
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
 
     if len(context.strip()) < MIN_CONTEXT_CHARS:
         return existing
 
-    prompt = f"""You are an expert in {TOPIC}.
+    prompt = f"""You are an expert in {config.TOPIC}.
 
 Given the text below about "{name}", extract a concise 1-2 sentence description
 of how this entity applies organic electronics or bioelectronics specifically
@@ -205,7 +202,7 @@ Text:
 ---
 
 Return ONLY a JSON object:
-{{"plant_application": "..." or null}}
+{{"domain_application": "..." or null}}
 
 If no plant-specific application is clearly supported by the text, return null.
 If you are not confident the answer is explicitly supported by the text, return null rather than guessing.
@@ -214,7 +211,7 @@ Do NOT invent or guess. No preamble, no markdown fences.
     try:
         raw  = _call_llm(prompt)
         data = _parse_json(raw)
-        val  = data.get("plant_application")
+        val  = data.get("domain_application")
         if val and str(val).lower() not in ("null", "none", ""):
             return str(val).strip()
     except Exception as e:
@@ -229,7 +226,7 @@ def _enrich_notable_outputs(name: str, existing: str, raw_text: str) -> list:
     """
     print(f"    [ENRICH] notable_outputs")
 
-    short = _shorten_query(name, TOPIC)
+    short = _shorten_query(name, config.TOPIC)
     q1  = f"{short} paper publication"
     q2  = f"{short} patent product"
     ddg = _ddg_text(q1) + "\n\n" + _ddg_text(q2)
@@ -239,7 +236,7 @@ def _enrich_notable_outputs(name: str, existing: str, raw_text: str) -> list:
         # Return existing as plain list if already structured, else wrap
         return _existing_to_links(existing)
 
-    prompt = f"""You are an expert in {TOPIC}.
+    prompt = f"""You are an expert in {config.TOPIC}.
 
 Given the text below about "{name}", extract notable outputs:
 papers, patents, products, datasets, or tools they have produced.
@@ -325,7 +322,7 @@ def _enrich_key_people(name: str, existing: str, raw_text: str, topic: str) -> s
     if len(context.strip()) < MIN_CONTEXT_CHARS:
         return existing
 
-    prompt = f"""You are an expert in {TOPIC}.
+    prompt = f"""You are an expert in {topic}.
 
 Given the text below about "{name}", extract names of key researchers,
 principal investigators, or team members working specifically on {topic}.
@@ -387,9 +384,9 @@ def enrich_all(analyzed: dict, force: bool = False) -> dict:
 
         enriched = dict(data)
 
-        enriched["plant_application"] = _enrich_plant_application(
+        enriched["domain_application"] = _enrich_plant_application(
             name,
-            existing = str(data.get("plant_application") or ""),
+            existing = str(data.get("domain_application") or ""),
             raw_text = raw_text,
         )
 
@@ -404,7 +401,7 @@ def enrich_all(analyzed: dict, force: bool = False) -> dict:
             name,
             existing = str(data.get("key_people") or ""),
             raw_text = raw_text,
-            topic    = TOPIC,
+            topic    = config.TOPIC,
         )
 
         with open(cache, "w") as f:

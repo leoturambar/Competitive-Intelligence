@@ -5,7 +5,7 @@
 from datetime import date
 from pathlib import Path
 
-from config import REPORT_TITLE, REPORT_SUBTITLE, TOPIC_DESCRIPTION
+import config
 
 REPORTS_DIR = Path("data/reports")
 
@@ -135,7 +135,7 @@ def _entity_card(e: dict) -> str:
     score    = e.get("relevance_score")
     summary  = _format_value(e.get("summary"))
     tech     = _format_value(e.get("technology_focus"))
-    plant    = _format_value(e.get("plant_application"))
+    plant    = _format_value(e.get("domain_application"))
     funding  = _format_value(e.get("funding_or_status"))
     people   = _format_value(e.get("key_people"))
     outputs  = _render_outputs(e.get("notable_outputs"))
@@ -165,7 +165,7 @@ def _entity_card(e: dict) -> str:
 
   <div class="detail-grid">
     <div><span class="meta-label">Technology focus</span><p>{tech}</p></div>
-    <div><span class="meta-label">Plant application</span><p>{plant}</p></div>
+    <div><span class="meta-label">{config.DOMAIN_LABEL}</span><p>{plant}</p></div>
     <div><span class="meta-label">Key people</span><p>{people}</p></div>
     <div><span class="meta-label">Notable outputs</span><p>{outputs}</p></div>
   </div>
@@ -180,6 +180,10 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
     Returns the path to the saved file.
     """
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    report_title      = config.REPORT_TITLE
+    report_subtitle   = config.REPORT_SUBTITLE
+    topic_description = config.TOPIC_DESCRIPTION
 
     today     = date.today().isoformat()
     filename  = filename or f"competitive_intelligence_{today}.html"
@@ -203,7 +207,7 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{REPORT_TITLE} — {REPORT_SUBTITLE}</title>
+<title>{report_title} — {report_subtitle}</title>
 <style>
   :root {{
     --blue:   #1a6fa8;
@@ -389,9 +393,9 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
 
 <div class="page-header">
   <div class="label">Intelligence Report</div>
-  <h1>{REPORT_TITLE}</h1>
-  <h2>{REPORT_SUBTITLE}</h2>
-  <p class="description">{TOPIC_DESCRIPTION}</p>
+  <h1>{report_title}</h1>
+  <h2>{report_subtitle}</h2>
+  <p class="description">{topic_description}</p>
   <div class="stats-bar">
     <div class="stat"><div class="num">{n_entities}</div><div class="lbl">Entities</div></div>
     <div class="stat"><div class="num">{n_companies}</div><div class="lbl">Companies / Spinoffs</div></div>
@@ -407,7 +411,7 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
 </div>
 
 <div class="footer">
-  Generated automatically · {REPORT_TITLE} · {today}
+  Generated automatically · {report_title} · {today}
 </div>
 
 </body>
