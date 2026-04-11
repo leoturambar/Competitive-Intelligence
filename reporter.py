@@ -9,43 +9,6 @@ from config import REPORT_TITLE, REPORT_SUBTITLE, TOPIC_DESCRIPTION
 
 REPORTS_DIR = Path("data/reports")
 
-
-def _format_value(v):
-    if v is None:
-        return "—"
-    # try to parse string-encoded lists
-    if isinstance(v, str):
-        stripped = v.strip()
-        if stripped.startswith("["):
-            try:
-                import json, ast
-                try:
-                    v = json.loads(stripped)
-                except Exception:
-                    v = ast.literal_eval(stripped)
-            except Exception:
-                pass
-    if isinstance(v, list):
-        parts = []
-        for x in v:
-            if isinstance(x, dict):
-                # formato dizionario → stringa leggibile
-                title = x.get("title") or x.get("name") or str(x)
-                year  = x.get("year")
-                typ   = x.get("type")
-                label = f"{typ.capitalize()}: {title}" if typ else title
-                if year:
-                    label += f" ({year})"
-                parts.append(label)
-            elif x and str(x).lower() not in ("null", "none", ""):
-                parts.append(str(x).strip())
-        return ", ".join(parts) if parts else "—"
-    s = str(v).strip()
-    if s.lower() in ("null", "none", ""):
-        return "—"
-    return s
-
-
 # ── Stage / position badge colours ───────────
 STAGE_COLORS = {
     "Research":   ("#e8f4fd", "#1a6fa8"),
@@ -103,21 +66,79 @@ def _score_dots(score):
     return f'<span style="color:#1a6fa8;letter-spacing:2px">{filled}</span><span style="color:#d5d8dc">{empty}</span>'
 
 
+def _format_value(v) -> str:
+    """Convert any LLM field value to clean display string."""
+    if v is None:
+        return "—"
+    if isinstance(v, list):
+        parts = []
+        for x in v:
+            if isinstance(x, dict):
+                title = x.get("title") or x.get("name") or str(x)
+                year  = x.get("year")
+                typ   = x.get("type")
+                label = f"{typ.capitalize()}: {title}" if typ else title
+                if year:
+                    label += f" ({year})"
+                parts.append(label)
+            elif x and str(x).lower() not in ("null", "none", ""):
+                parts.append(str(x).strip())
+        return ", ".join(parts) if parts else "—"
+    s = str(v).strip()
+    if s.lower() in ("null", "none", ""):
+        return "—"
+    return s
+
+
+def _render_outputs(outputs) -> str:
+    """
+    Render notable_outputs as clickable links if URLs available,
+    otherwise as plain text.
+    """
+    if not outputs:
+        return "—"
+    if isinstance(outputs, list):
+        if not outputs:
+            return "—"
+        parts = []
+        for item in outputs:
+            if not isinstance(item, dict):
+                s = str(item).strip()
+                if s and s.lower() not in ("null", "none"):
+                    parts.append(s)
+                continue
+            label = (item.get("label") or item.get("title") or "").strip()
+            url   = item.get("url", "")
+            if not label or label.lower() in ("null", "none"):
+                continue
+            if url:
+                parts.append(
+                    f'<a href="{url}" target="_blank" rel="noopener" '
+                    f'style="color:#1a6fa8;text-decoration:none;border-bottom:'
+                    f'1px dotted #1a6fa8">{label}</a>'
+                )
+            else:
+                parts.append(label)
+        return " · ".join(parts) if parts else "—"
+    s = str(outputs).strip()
+    return s if s and s.lower() not in ("null", "none") else "—"
+
+
 def _entity_card(e: dict) -> str:
     name     = e.get("entity_name", "Unknown")
     etype    = e.get("entity_type", "Other")
     icon     = TYPE_ICONS.get(etype, "•")
-    score    = e.get("relevance_score")
     country  = _format_value(e.get("country"))
     founded  = _format_value(e.get("founded_or_established"))
     stage    = _format_value(e.get("development_stage")) or "Unknown"
     position = _format_value(e.get("competitive_position")) or "Unknown"
-    funding  = _format_value(e.get("funding_or_status"))
-    people   = _format_value(e.get("key_people"))
-    outputs  = _format_value(e.get("notable_outputs"))
+    score    = e.get("relevance_score")
     summary  = _format_value(e.get("summary"))
     tech     = _format_value(e.get("technology_focus"))
     plant    = _format_value(e.get("plant_application"))
+    funding  = _format_value(e.get("funding_or_status"))
+    people   = _format_value(e.get("key_people"))
+    outputs  = _render_outputs(e.get("notable_outputs"))
 
     return f"""
 <div class="card">
@@ -173,7 +194,6 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
     n_entities = len(entities)
     n_companies = sum(1 for e in entities if e.get("entity_type") in ("Company", "Spinoff"))
     n_academic  = sum(1 for e in entities if e.get("entity_type") in ("University", "Research Institute"))
-    n_other     = n_entities - n_companies - n_academic
 
     cards_html = "\n".join(_entity_card(e) for e in entities)
 
@@ -375,7 +395,6 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
     <div class="stat"><div class="num">{n_entities}</div><div class="lbl">Entities</div></div>
     <div class="stat"><div class="num">{n_companies}</div><div class="lbl">Companies / Spinoffs</div></div>
     <div class="stat"><div class="num">{n_academic}</div><div class="lbl">Academic / Research</div></div>
-    <div class="stat"><div class="num">{n_other}</div><div class="lbl">Other</div></div>
     <div class="stat"><div class="num">{today}</div><div class="lbl">Generated</div></div>
   </div>
 </div>
