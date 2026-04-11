@@ -194,6 +194,7 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
     n_entities = len(entities)
     n_companies = sum(1 for e in entities if e.get("entity_type") in ("Company", "Spinoff"))
     n_academic  = sum(1 for e in entities if e.get("entity_type") in ("University", "Research Institute"))
+    n_other     = n_entities - n_companies - n_academic
 
     cards_html = "\n".join(_entity_card(e) for e in entities)
 
@@ -395,6 +396,7 @@ def generate_report(analyzed: dict, filename: str = None) -> Path:
     <div class="stat"><div class="num">{n_entities}</div><div class="lbl">Entities</div></div>
     <div class="stat"><div class="num">{n_companies}</div><div class="lbl">Companies / Spinoffs</div></div>
     <div class="stat"><div class="num">{n_academic}</div><div class="lbl">Academic / Research</div></div>
+    <div class="stat"><div class="num">{n_other}</div><div class="lbl">Other</div></div>
     <div class="stat"><div class="num">{today}</div><div class="lbl">Generated</div></div>
   </div>
 </div>

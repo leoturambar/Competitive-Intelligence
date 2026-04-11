@@ -97,17 +97,24 @@ def _call_llm(prompt: str) -> str:
 
 
 def _parse_json(raw: str) -> dict:
-    """Extract JSON from LLM response, tolerating minor formatting issues."""
-    # Strip potential markdown fences
     raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-    # Qwen sometimes returns bare "null" when it has nothing to say
     if raw.strip().lower() == "null":
         return {}
-    # Find first { ... } block
+    # Try standard JSON first
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
-        return json.loads(match.group())
-    raise ValueError(f"No JSON object found in LLM response:\n{raw[:300]}")
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    # Fallback: try to extract just up to the last valid closing brace
+    for i in range(len(raw), 0, -1):
+        if raw[i-1] == "}":
+            try:
+                return json.loads(raw[:i])
+            except json.JSONDecodeError:
+                continue
+    raise ValueError(f"No valid JSON found in LLM response:\n{raw[:300]}")
 
 
 # ── Main function ─────────────────────────────

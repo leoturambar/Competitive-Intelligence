@@ -3,6 +3,10 @@
 # ─────────────────────────────────────────────
 
 import argparse
+import json
+from datetime import datetime
+from pathlib import Path
+
 import config
 from scraper  import scrape_all
 from analyzer import analyze_all
@@ -10,11 +14,23 @@ from enricher import enrich_all
 from reporter import generate_report
 
 
+# ── Status file (read by Streamlit UI) ───────
+
+def _write_status(step: str, detail: str = "", done: bool = False, error: bool = False):
+    """Write current run milestone to data/run_status.json for UI polling."""
+    Path("data").mkdir(exist_ok=True)
+    with open("data/run_status.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "step":   step,
+            "detail": detail,
+            "done":   done,
+            "error":  error,
+            "ts":     datetime.now().isoformat(),
+        }, f)
+
+
 def apply_csv(csv_path: str):
-    """
-    Load topic and entities from a CSV file and override config globals.
-    This allows running the tool on different topics without editing config.py.
-    """
+    """Load topic and entities from CSV and override config globals."""
     from csv_loader import load_csv
     data = load_csv(csv_path)
 
@@ -25,9 +41,7 @@ def apply_csv(csv_path: str):
     if data["entities"]:
         config.ENTITIES = data["entities"]
 
-    # Update report subtitle to match topic
     config.REPORT_SUBTITLE = data["topic"].title()
-
     return data["slug"]
 
 
@@ -53,85 +67,94 @@ def run(
     extra_entities = []
     if discover:
         print("[STEP 0] Discovering new entities...")
+        _write_status("discovery", "searching DuckDuckGo...")
         from discoverer import discover as run_discovery
         extra_entities = run_discovery(force=force_discover)
-        print(f"         → {len(extra_entities)} new entities discovered\n")
+        msg = f"{len(extra_entities)} new entities found"
+        print(f"         -> {msg}\n")
+        _write_status("discovery", msg, done=True)
 
     # ── Step 1: Scrape ──────────────────────────────────
     if skip_scrape:
         print("[STEP 1] Scraping SKIPPED (loading from cache only)")
+        _write_status("scraping", "loading from cache", done=True)
         scraped = scrape_all(force=False, extra_entities=extra_entities)
     else:
+        n_total = len(config.ENTITIES) + len(extra_entities)
         print("[STEP 1] Scraping entity pages...")
+        _write_status("scraping", f"0 / {n_total} entities")
         scraped = scrape_all(force=force_scrape, extra_entities=extra_entities)
-        print(f"         → {len(scraped)} entities scraped\n")
+        msg = f"{len(scraped)} entities scraped"
+        print(f"         -> {msg}\n")
+        _write_status("scraping", msg, done=True)
 
     # ── Step 2: Analyze ─────────────────────────────────
     print("[STEP 2] Analysing with LLM...")
+    _write_status("analysis", f"0 / {len(scraped)} entities")
     analyzed = analyze_all(scraped, force=force_analyze)
-    print(f"         → {len(analyzed)} entities analysed\n")
+    msg = f"{len(analyzed)} entities analysed"
+    print(f"         -> {msg}\n")
+    _write_status("analysis", msg, done=True)
 
     # ── Step 3: Enrich ──────────────────────────────────
     if skip_enrich:
         print("[STEP 3] Enrichment SKIPPED")
+        _write_status("enrichment", "skipped", done=True)
         final = analyzed
     else:
         print("[STEP 3] Enriching (plant application, outputs, people)...")
+        _write_status("enrichment", f"0 / {len(analyzed)} entities")
         final = enrich_all(analyzed, force=force_enrich)
-        print(f"         → {len(final)} entities enriched\n")
+        msg = f"{len(final)} entities enriched"
+        print(f"         -> {msg}\n")
+        _write_status("enrichment", msg, done=True)
 
     # ── Step 4: Report ──────────────────────────────────
     print("[STEP 4] Generating report...")
+    _write_status("report", "generating...")
     from csv_loader import csv_slug_to_report_name
     from datetime import date
     filename = (
         csv_slug_to_report_name(csv_slug, date.today().isoformat())
-        if csv_slug
-        else None
+        if csv_slug else None
     )
     path = generate_report(final, filename=filename)
+    msg = path.name
     print(f"\n{'='*56}")
     print(f"  ✓ Report ready: {path}")
     print(f"{'='*56}\n")
+    _write_status("done", msg, done=True)
     return path
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Competitive Intelligence Tool"
-    )
-    parser.add_argument("--entities",       type=str, default=None,
-                        help="Path to CSV file with topic and entity list")
-    parser.add_argument("--discover",       action="store_true",
-                        help="Auto-discover new entities via DDG + LLM")
-    parser.add_argument("--force-discover", action="store_true",
-                        help="Re-run discovery even if cache exists")
-    parser.add_argument("--force-scrape",   action="store_true",
-                        help="Re-scrape all entities")
-    parser.add_argument("--force-analyze",  action="store_true",
-                        help="Re-run LLM analysis")
-    parser.add_argument("--force-enrich",   action="store_true",
-                        help="Re-run enrichment passes")
-    parser.add_argument("--force",          action="store_true",
-                        help="Force all steps from scratch")
-    parser.add_argument("--skip-scrape",    action="store_true",
-                        help="Skip scraping, use existing raw cache")
-    parser.add_argument("--skip-enrich",    action="store_true",
-                        help="Skip enrichment, go straight to report")
+    parser = argparse.ArgumentParser(description="Competitive Intelligence Tool")
+    parser.add_argument("--entities",       type=str,          default=None)
+    parser.add_argument("--discover",       action="store_true")
+    parser.add_argument("--force-discover", action="store_true")
+    parser.add_argument("--force-scrape",   action="store_true")
+    parser.add_argument("--force-analyze",  action="store_true")
+    parser.add_argument("--force-enrich",   action="store_true")
+    parser.add_argument("--force",          action="store_true")
+    parser.add_argument("--skip-scrape",    action="store_true")
+    parser.add_argument("--skip-enrich",    action="store_true")
     args = parser.parse_args()
 
-    # Load CSV if provided — overrides config.py topic and entities
     csv_slug = None
     if args.entities:
         csv_slug = apply_csv(args.entities)
 
-    run(
-        force_scrape   = args.force or args.force_scrape,
-        force_analyze  = args.force or args.force_analyze,
-        force_enrich   = args.force or args.force_enrich,
-        force_discover = args.force or args.force_discover,
-        skip_scrape    = args.skip_scrape,
-        skip_enrich    = args.skip_enrich,
-        discover       = args.discover or args.force_discover,
-        csv_slug       = csv_slug,
-    )
+    try:
+        run(
+            force_scrape   = args.force or args.force_scrape,
+            force_analyze  = args.force or args.force_analyze,
+            force_enrich   = args.force or args.force_enrich,
+            force_discover = args.force or args.force_discover,
+            skip_scrape    = args.skip_scrape,
+            skip_enrich    = args.skip_enrich,
+            discover       = args.discover or args.force_discover,
+            csv_slug       = csv_slug,
+        )
+    except Exception as e:
+        _write_status("error", str(e), error=True)
+        raise

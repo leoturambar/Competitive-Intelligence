@@ -99,3 +99,8 @@ MAX_TEXT_CHARS    = 8000    # chars of scraped text passed to LLM per URL
 # ── Report settings ──────────────────────────
 REPORT_TITLE  = "Competitive Intelligence Report"
 REPORT_SUBTITLE = "Organic Bioelectronics for Plants"
+
+# ── Allow override via environment variable (used by Streamlit UI) ────
+import os as _os
+if _os.environ.get("CI_LLM_BACKEND") in ("ollama", "claude"):
+    LLM_BACKEND = _os.environ["CI_LLM_BACKEND"]

@@ -226,14 +226,14 @@ def discover(force: bool = False) -> list:
         links = _ddg_links(query)
 
         if not links:
-            print(f"    → no links")
+            print(f"    -> no links")
             continue
 
         for url in links:
             if url in seen_urls or url in known_urls:
                 continue
             seen_urls.add(url)
-            print(f"    → {url}")
+            print(f"    -> {url}")
             text = _fetch_text(url)
             if text:
                 extracted = _extract_affiliations(text, url)
@@ -252,7 +252,7 @@ def discover(force: bool = False) -> list:
                 if url in seen_urls or url in known_urls:
                     continue
                 seen_urls.add(url)
-                print(f"    → {url}")
+                print(f"    -> {url}")
                 text = _fetch_text(url)
                 if text:
                     extracted = _extract_affiliations(text, url)
