@@ -11,10 +11,7 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-from config import (
-    ENTITIES, REQUEST_TIMEOUT, REQUEST_DELAY,
-    MAX_TEXT_CHARS, DDG_DELAY
-)
+import config
 
 UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -46,7 +43,7 @@ def _fetch_url(url: str) -> str:
         "User-Agent": random.choice(UA_LIST),
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT)
         resp.raise_for_status()
         return _clean_text(resp.text)
     except Exception as e:
@@ -65,7 +62,7 @@ def scrape_all(force: bool = False, extra_entities: list = None) -> dict:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     results = {}
 
-    all_entities = list(ENTITIES) + (extra_entities or [])
+    all_entities = list(config.ENTITIES) + (extra_entities or [])
 
     for entity in all_entities:
         name  = entity["name"]
@@ -86,14 +83,14 @@ def scrape_all(force: bool = False, extra_entities: list = None) -> dict:
             text = _fetch_url(url)
             if text:
                 combined_text += f"\n\n[Source: {url}]\n{text}"
-            time.sleep(REQUEST_DELAY)
+            time.sleep(config.REQUEST_DELAY)
 
         # Append any manual notes from config
         if entity.get("notes"):
             combined_text += f"\n\n[Background notes]: {entity['notes']}"
 
         # Truncate to budget
-        combined_text = combined_text[:MAX_TEXT_CHARS]
+        combined_text = combined_text[:config.MAX_TEXT_CHARS]
 
         payload = {
             "name":  name,

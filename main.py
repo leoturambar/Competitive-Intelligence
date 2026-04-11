@@ -17,15 +17,40 @@ from reporter import generate_report
 # ── Status file (read by Streamlit UI) ───────
 
 def _write_status(step: str, detail: str = "", done: bool = False, error: bool = False):
-    """Write current run milestone to data/run_status.json for UI polling."""
+    """Write current run milestone to data/run_status.json for UI polling.
+
+    Maintains a cumulative history of completed steps so the Streamlit UI
+    can show each step as done (green) as the run progresses.
+    """
     Path("data").mkdir(exist_ok=True)
-    with open("data/run_status.json", "w", encoding="utf-8") as f:
+    status_file = Path("data/run_status.json")
+
+    # Carry forward the history of completed steps
+    history = {}
+    if status_file.exists():
+        try:
+            with open(status_file, encoding="utf-8") as f:
+                existing = json.load(f)
+            history = existing.get("history", {})
+            cur = existing.get("current", existing)
+            prev_step   = cur.get("step", "")
+            prev_detail = cur.get("detail", "")
+            # When we transition to a new step, mark the previous one as done
+            if prev_step and prev_step != step and prev_step not in ("done", "error"):
+                history[prev_step] = prev_detail
+        except Exception:
+            pass
+
+    with open(status_file, "w", encoding="utf-8") as f:
         json.dump({
-            "step":   step,
-            "detail": detail,
-            "done":   done,
-            "error":  error,
-            "ts":     datetime.now().isoformat(),
+            "current": {
+                "step":   step,
+                "detail": detail,
+                "done":   done,
+                "error":  error,
+                "ts":     datetime.now().isoformat(),
+            },
+            "history": history,
         }, f)
 
 
