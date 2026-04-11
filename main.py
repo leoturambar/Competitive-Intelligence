@@ -3,11 +3,32 @@
 # ─────────────────────────────────────────────
 
 import argparse
-from config   import LLM_BACKEND, TOPIC
+import config
 from scraper  import scrape_all
 from analyzer import analyze_all
 from enricher import enrich_all
 from reporter import generate_report
+
+
+def apply_csv(csv_path: str):
+    """
+    Load topic and entities from a CSV file and override config globals.
+    This allows running the tool on different topics without editing config.py.
+    """
+    from csv_loader import load_csv
+    data = load_csv(csv_path)
+
+    if data["topic"]:
+        config.TOPIC = data["topic"]
+    if data["description"]:
+        config.TOPIC_DESCRIPTION = data["description"]
+    if data["entities"]:
+        config.ENTITIES = data["entities"]
+
+    # Update report subtitle to match topic
+    config.REPORT_SUBTITLE = data["topic"].title()
+
+    return data["slug"]
 
 
 def run(
@@ -18,11 +39,14 @@ def run(
     skip_scrape    = False,
     skip_enrich    = False,
     discover       = False,
+    csv_slug       = None,
 ):
     print(f"\n{'='*56}")
     print(f"  Competitive Intelligence Tool")
-    print(f"  Topic : {TOPIC}")
-    print(f"  LLM   : {LLM_BACKEND}")
+    print(f"  Topic : {config.TOPIC}")
+    print(f"  LLM   : {config.LLM_BACKEND}")
+    if csv_slug:
+        print(f"  Input : {csv_slug}.csv")
     print(f"{'='*56}\n")
 
     # ── Step 0: Discovery (optional) ────────────────────
@@ -58,7 +82,14 @@ def run(
 
     # ── Step 4: Report ──────────────────────────────────
     print("[STEP 4] Generating report...")
-    path = generate_report(final)
+    from csv_loader import csv_slug_to_report_name
+    from datetime import date
+    filename = (
+        csv_slug_to_report_name(csv_slug, date.today().isoformat())
+        if csv_slug
+        else None
+    )
+    path = generate_report(final, filename=filename)
     print(f"\n{'='*56}")
     print(f"  ✓ Report ready: {path}")
     print(f"{'='*56}\n")
@@ -69,6 +100,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Competitive Intelligence Tool"
     )
+    parser.add_argument("--entities",       type=str, default=None,
+                        help="Path to CSV file with topic and entity list")
     parser.add_argument("--discover",       action="store_true",
                         help="Auto-discover new entities via DDG + LLM")
     parser.add_argument("--force-discover", action="store_true",
@@ -87,6 +120,11 @@ if __name__ == "__main__":
                         help="Skip enrichment, go straight to report")
     args = parser.parse_args()
 
+    # Load CSV if provided — overrides config.py topic and entities
+    csv_slug = None
+    if args.entities:
+        csv_slug = apply_csv(args.entities)
+
     run(
         force_scrape   = args.force or args.force_scrape,
         force_analyze  = args.force or args.force_analyze,
@@ -95,4 +133,5 @@ if __name__ == "__main__":
         skip_scrape    = args.skip_scrape,
         skip_enrich    = args.skip_enrich,
         discover       = args.discover or args.force_discover,
+        csv_slug       = csv_slug,
     )

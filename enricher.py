@@ -3,13 +3,18 @@
 # ─────────────────────────────────────────────
 #
 #  Enriches analyzed entity data with three targeted passes:
-#    1. plant_application  — DDG "{name} plant application organic electronics"
-#    2. notable_outputs    — DDG "{name} paper publication patent"
-#    3. key_people         — DDG "{name} researcher principal investigator plant"
+#    1. plant_application  — DDG + LLM → concise description
+#    2. notable_outputs    — DDG + LLM → list of dicts with label + url
+#    3. key_people         — DDG + LLM → list of names with roles
+#
+#  Link resolution for notable_outputs (hybrid approach):
+#    - If DOI found in text   → https://doi.org/{doi}
+#    - If paper, no DOI       → Semantic Scholar API search
+#    - If patent number found → https://patents.google.com/patent/{number}
+#    - Otherwise              → no link (label only)
 #
 #  Reads from  : data/analyzed/<slug>.json
 #  Writes to   : data/enriched/<slug>.json
-#  Falls back to original value if enrichment fails or adds nothing.
 # ─────────────────────────────────────────────
 
 import json
@@ -17,7 +22,7 @@ import re
 import random
 import time
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,15 +40,14 @@ UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
 
-ENRICHED_DIR      = Path("data/enriched")
-DDG_ENRICH_RESULTS = 2      # pages to fetch per DDG query
-DDG_MIN_CHARS      = 300    # min chars to consider DDG result useful
+ENRICHED_DIR       = Path("data/enriched")
+DDG_ENRICH_RESULTS = 2
+MIN_CONTEXT_CHARS  = 500   # skip LLM call if context is too sparse
 
 
 # ── DDG helpers ───────────────────────────────
 
 def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
-    """Return up to max_results URLs from a DuckDuckGo HTML search."""
     url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
     headers = {"User-Agent": random.choice(UA_LIST)}
     try:
@@ -52,7 +56,6 @@ def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
         links = []
         for a in soup.select("a.result__a"):
             href = a.get("href", "")
-            # DDG wraps links as //duckduckgo.com/l/?uddg=<encoded_url>
             if "uddg=" in href:
                 try:
                     encoded = href.split("uddg=")[1].split("&")[0]
@@ -71,7 +74,6 @@ def _ddg_links(query: str, max_results: int = DDG_ENRICH_RESULTS) -> list:
 
 
 def _fetch_text(url: str) -> str:
-    """Fetch URL and return cleaned text."""
     headers = {"User-Agent": random.choice(UA_LIST)}
     try:
         resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -88,7 +90,6 @@ def _fetch_text(url: str) -> str:
 
 
 def _ddg_text(query: str) -> str:
-    """Search DDG and return combined text from top pages."""
     links = _ddg_links(query)
     combined = ""
     for url in links:
@@ -101,24 +102,17 @@ def _ddg_text(query: str) -> str:
 
 
 def _shorten_query(name: str, topic: str) -> str:
-    """
-    Shorten a long entity name into a compact DDG-friendly query.
-    Removes generic words and keeps distinctive terms.
-    """
-    # Words to drop — too generic or too long to help DDG
+    """Shorten a long entity name into a compact DDG-friendly query."""
     stopwords = {
         "college", "department", "of", "and", "the", "for",
         "science", "technology", "institute", "division", "faculty",
         "school", "center", "centre",
     }
-    # Keep words from the name that are distinctive (>3 chars, not stopwords)
     name_words = [
         w for w in re.sub(r"[,\-—–]", " ", name).lower().split()
         if w not in stopwords and len(w) > 3
     ]
-    # Keep max 3 distinctive words from the name
-    name_part = " ".join(name_words[:3])
-    # Add 2-3 key topic words
+    name_part  = " ".join(name_words[:3])
     topic_words = [
         w for w in topic.lower().split()
         if w not in stopwords and len(w) > 3
@@ -127,19 +121,73 @@ def _shorten_query(name: str, topic: str) -> str:
     return f"{name_part} {topic_part}".strip()
 
 
+# ── Link resolution ───────────────────────────
+
+def _resolve_doi(doi: str) -> str:
+    """Return DOI URL."""
+    doi = doi.strip().lstrip("https://doi.org/").lstrip("doi.org/")
+    return f"https://doi.org/{doi}"
+
+
+def _semantic_scholar(title: str) -> str | None:
+    """Search Semantic Scholar API for a paper by title. Returns URL or None."""
+    try:
+        resp = requests.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={"query": title, "limit": 1, "fields": "title,url,externalIds"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        papers = data.get("data", [])
+        if not papers:
+            return None
+        paper = papers[0]
+        # Prefer DOI if available
+        ext = paper.get("externalIds", {})
+        if ext.get("DOI"):
+            return f"https://doi.org/{ext['DOI']}"
+        return paper.get("url")
+    except Exception as e:
+        print(f"      [WARN] Semantic Scholar failed: {e}")
+        return None
+
+
+def _google_patents_url(patent_number: str) -> str:
+    """Build Google Patents URL from patent number."""
+    # Normalise: remove spaces, keep alphanumeric
+    num = re.sub(r"\s+", "", patent_number).upper()
+    return f"https://patents.google.com/patent/{num}"
+
+
+def _resolve_output_url(item: dict) -> str | None:
+    """
+    Hybrid link resolution for a single output item.
+    item keys: type, title, year, doi, patent_number
+    """
+    typ   = (item.get("type") or "").lower()
+    title = (item.get("title") or "").strip()
+
+    # Patent number → Google Patents
+    if "patent" in typ:
+        return f"https://patents.google.com/?q={quote(title)}" if title else None
+
+    # Paper/publication → Semantic Scholar
+    if title and typ in ("paper", "publication", "article", "review", "preprint", ""):
+        return _semantic_scholar(title)
+
+    return None
+
+
 # ── Enrichment passes ─────────────────────────
 
 def _enrich_plant_application(name: str, existing: str, raw_text: str) -> str:
-    """
-    Use targeted DDG search + LLM to extract or improve plant_application.
-    Falls back to existing value if nothing better is found.
-    """
     print(f"    [ENRICH] plant_application")
-    query = _shorten_query(name, TOPIC)
-    ddg     = _ddg_text(query)
+    short = _shorten_query(name, TOPIC)
+    ddg   = _ddg_text(f"{short} plant application")
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
 
-    if not context.strip():
+    if len(context.strip()) < MIN_CONTEXT_CHARS:
         return existing
 
     prompt = f"""You are an expert in {TOPIC}.
@@ -149,19 +197,19 @@ of how this entity applies organic electronics or bioelectronics specifically
 to living plants.
 
 Focus only on plant-specific applications (sensing, actuation, nutrient delivery,
-plant-machine interfaces). If no plant-specific application is found, return null.
+plant-machine interfaces).
 
 Text:
 ---
 {context[:6000]}
 ---
 
-Return ONLY a JSON object with one field:
+Return ONLY a JSON object:
 {{"plant_application": "..." or null}}
 
-If no plant-specific application is clearly supported by the text, return null. Do NOT invent or guess.
-
-No preamble, no markdown fences.
+If no plant-specific application is clearly supported by the text, return null.
+If you are not confident the answer is explicitly supported by the text, return null rather than guessing.
+Do NOT invent or guess. No preamble, no markdown fences.
 """
     try:
         raw  = _call_llm(prompt)
@@ -171,42 +219,46 @@ No preamble, no markdown fences.
             return str(val).strip()
     except Exception as e:
         print(f"      [WARN] LLM failed: {e}")
-
     return existing
 
 
-def _enrich_notable_outputs(name: str, existing: str, raw_text: str) -> str:
+def _enrich_notable_outputs(name: str, existing: str, raw_text: str) -> list:
     """
-    Search DDG for papers, patents, products and extract a clean list.
+    Returns a list of dicts: {label, url}
+    url may be None if no link could be resolved.
     """
     print(f"    [ENRICH] notable_outputs")
 
     short = _shorten_query(name, TOPIC)
-    q1 = f'{short} paper publication'
-    q2 = f'{short} patent product'
+    q1  = f"{short} paper publication"
+    q2  = f"{short} patent product"
     ddg = _ddg_text(q1) + "\n\n" + _ddg_text(q2)
-
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
 
-    if not context.strip():
-        return existing
+    if len(context.strip()) < MIN_CONTEXT_CHARS:
+        # Return existing as plain list if already structured, else wrap
+        return _existing_to_links(existing)
 
     prompt = f"""You are an expert in {TOPIC}.
 
-Given the text below about "{name}", extract a list of notable outputs:
+Given the text below about "{name}", extract notable outputs:
 papers, patents, products, datasets, or tools they have produced.
 
-For each item include: type (paper/patent/product/tool), title or name
-(use a short label of max 8 words, not a full sentence), and year if available.
+For each item return a JSON object with:
+- "type": paper | patent | product | tool | dataset
+- "title": short label, max 8 words
+- "year": year as string if available, else null
 
-Return ONLY a JSON object:
-{{"notable_outputs": ["item 1", "item 2", ...] or null}}
+Return ONLY:
+{{"notable_outputs": [
+  {{"type": "...", "title": "...", "year": "..."}},
+  ...
+] or null}}
 
-Keep each item concise (one line). Maximum 6 items. Most relevant first.
-
-Only include outputs explicitly mentioned in the text. Do NOT invent or guess titles, patents, or products.
-
-No preamble, no markdown fences.
+Maximum 6 items. Most relevant first.
+Only include outputs explicitly mentioned in the text.
+If you are not confident an output is real and in the text, omit it.
+Do NOT invent titles, DOIs, or patent numbers. No preamble, no markdown fences.
 
 Text:
 ---
@@ -216,54 +268,77 @@ Text:
     try:
         raw  = _call_llm(prompt)
         data = _parse_json(raw)
-        val  = data.get("notable_outputs")
-        if val and isinstance(val, list) and len(val) > 0:
-            clean = [str(x).strip() for x in val
-                     if x and str(x).lower() not in ("null", "none", "")]
-            if clean:
-                return ", ".join(clean)
-        elif val and isinstance(val, str) and val.lower() not in ("null", "none", ""):
-            return val.strip()
+        items = data.get("notable_outputs")
+
+        if not items or not isinstance(items, list):
+            return _existing_to_links(existing)
+
+        result = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or "").strip()
+            year  = (item.get("year")  or "").strip()
+            typ   = (item.get("type")  or "").strip()
+            if not title or title.lower() in ("null", "none"):
+                continue
+
+            label = f"{typ.capitalize()}: {title}" if typ else title
+            if year and year.lower() not in ("null", "none"):
+                label += f" ({year})"
+
+            print(f"      [LINK] resolving: {label}")
+            url = _resolve_output_url(item)
+            if url:
+                print(f"             → {url}")
+
+            result.append({"label": label, "url": url})
+
+        return result if result else _existing_to_links(existing)
+
     except Exception as e:
         print(f"      [WARN] LLM failed: {e}")
+        return _existing_to_links(existing)
 
-    return existing
+
+def _existing_to_links(existing: str) -> list:
+    """Convert a legacy plain-text notable_outputs string to link list format."""
+    if not existing or (isinstance(existing, str) and existing.strip().lower() in ("null", "none", "")):
+        return []
+    # If already a list of dicts (re-loaded from cache), return as-is
+    if isinstance(existing, list):
+        return existing
+    # Split comma-separated string into label-only items
+    parts = [p.strip() for p in str(existing).split(",") if p.strip()]
+    return [{"label": p, "url": None} for p in parts]
 
 
 def _enrich_key_people(name: str, existing: str, raw_text: str, topic: str) -> str:
-    """
-    Search DDG for researchers/PIs specifically working on the topic.
-    Uses short name to avoid overly restrictive queries.
-    """
     print(f"    [ENRICH] key_people")
 
-    short_name = _shorten_query(name, TOPIC)
-    q1 = f'{short_name} researcher principal investigator'
-    q2 = f'{short_name} team scientist lab'
+    short = _shorten_query(name, topic)
+    q1  = f"{short} researcher principal investigator"
+    q2  = f"{short} team scientist lab plant bioelectronics"
     ddg = _ddg_text(q1) + "\n\n" + _ddg_text(q2)
-
     context = f"{raw_text}\n\n{ddg}" if ddg else raw_text
 
-    if not context.strip():
+    if len(context.strip()) < MIN_CONTEXT_CHARS:
         return existing
 
     prompt = f"""You are an expert in {TOPIC}.
 
-Given the text below about "{name}", extract the names of key researchers,
-principal investigators, or team members who work specifically on {topic}.
+Given the text below about "{name}", extract names of key researchers,
+principal investigators, or team members working specifically on {topic}.
 
-Important: prefer researchers directly involved in the specific topic
-("{topic}") over general directors or administrators of the organisation.
-Include both senior PIs and notable junior researchers if mentioned.
+Prefer researchers directly involved in "{topic}" over general administrators.
 
-Return ONLY a JSON object:
-{{"key_people": ["Name 1 (role if known)", "Name 2 (role if known)", ...] or null}}
+Return ONLY:
+{{"key_people": ["Name 1 (role if known)", ...] or null}}
 
 Maximum 4 people.
-
-Only include people explicitly named in the text. Do NOT invent or guess names.
-
-No preamble, no markdown fences.
+Only include people explicitly named in the text.
+If you are not confident a name is correct and present in the text, omit it.
+Do NOT invent or guess names. No preamble, no markdown fences.
 
 Text:
 ---
@@ -283,19 +358,12 @@ Text:
             return val.strip()
     except Exception as e:
         print(f"      [WARN] LLM failed: {e}")
-
     return existing
 
 
 # ── Main function ─────────────────────────────
 
 def enrich_all(analyzed: dict, force: bool = False) -> dict:
-    """
-    Run enrichment passes on all analyzed entities.
-    Reads raw text from data/raw/ for additional context.
-    Results cached in data/enriched/<slug>.json.
-    Returns dict: {entity_name: enriched_dict}
-    """
     ENRICHED_DIR.mkdir(parents=True, exist_ok=True)
     results = {}
 
@@ -325,9 +393,10 @@ def enrich_all(analyzed: dict, force: bool = False) -> dict:
             raw_text = raw_text,
         )
 
+        # notable_outputs is now a list of {label, url} dicts
         enriched["notable_outputs"] = _enrich_notable_outputs(
             name,
-            existing = str(data.get("notable_outputs") or ""),
+            existing = data.get("notable_outputs") or "",
             raw_text = raw_text,
         )
 
