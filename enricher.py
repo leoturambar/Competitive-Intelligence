@@ -290,7 +290,7 @@ Text:
             print(f"      [LINK] resolving: {label}")
             url = _resolve_output_url(item)
             if url:
-                print(f"             → {url}")
+                print(f"             -> {url}")
 
             result.append({"label": label, "url": url})
 
