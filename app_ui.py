@@ -107,10 +107,11 @@ def read_status() -> dict:
         return {"current": {}, "history": {}}
 
 
-def render_milestones(steps: list, status: dict):
+def render_milestones(steps: list, status: dict, is_running: bool = True):
     """
     steps: list of (key, label) for this run configuration.
     status: {"current": {...}, "history": {"step_key": "detail", ...}}
+    is_running: False when displaying a previous (completed or aborted) run.
     """
     current  = status.get("current", {})
     history  = status.get("history", {})
@@ -128,8 +129,11 @@ def render_milestones(steps: list, status: dict):
             detail = current.get("detail", "running...")
             if is_error:
                 css, bullet = "ms-error", "&#x2717;"
-            else:
+            elif is_running:
                 css, bullet = "ms-running", "&#x25C9;"
+            else:
+                # Stale "current" from a previous aborted run — show as pending
+                detail, css, bullet = "", "ms-pending", "&#x25CB;"
         else:
             detail, css, bullet = "", "ms-pending", "&#x25CB;"
 
@@ -221,7 +225,6 @@ with col4:
 if force_all:
     skip_scrape    = False
     force_discover = False
-    do_discover    = False
 
 if force_discover:
     do_discover = True
@@ -334,9 +337,8 @@ else:
     status = read_status()
     if status.get("current") or status.get("history"):
         with status_placeholder.container():
-            label = "Last run" if not st.session_state.running else "Progress"
-            st.markdown(f'<p class="section-label">{label}</p>', unsafe_allow_html=True)
-            render_milestones(steps, status)
+            st.markdown('<p class="section-label">Progress</p>', unsafe_allow_html=True)
+            render_milestones(steps, status, is_running=False)
 
 
 # ── Open report button ────────────────────────

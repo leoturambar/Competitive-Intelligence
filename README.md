@@ -24,9 +24,9 @@ When you pass `--discover`, the pipeline runs a set of configurable DuckDuckGo s
 
 Academic papers typically cluster their affiliation section near the top of the document, using a predictable typographic structure: numbered or lettered superscripts followed by institution names. The `_regex_affiliations` function exploits this by sliding a 400-word window across the full page text and scoring each position by how many affiliation markers it contains — words like "university", "institute", "laboratory", "center". It keeps the highest-density window and then applies four regex patterns to pull out candidate organization strings. The result is a raw list of up to 30 affiliation-like strings per page, most of which are real institutions and some of which are postal addresses, DOI fragments, or other noise.
 
-The verification step filters this down. Each candidate string is passed through a noise pre-filter — anything containing a long digit sequence (postal codes), a street address word, a URL, or a DOI prefix is rejected immediately. Candidates that survive must contain at least one organisation indicator (university, institute, lab, GmbH, Ltd, etc.). The surviving candidates are then each searched on DuckDuckGo with the topic appended, and the top-2 result pages are fetched and checked: a candidate is accepted only if the resulting page contains at least two of the configured topic keywords. This means a candidate like "Department of Chemistry, University of Bologna" gets rejected if its web page has no signal for organic bioelectronics, but a less well-known lab working specifically on plant electrodes gets accepted because their page contains "OECT", "conducting polymer", "plant" — the relevant keywords.
+The verification step filters this down. Each candidate string is passed through a noise pre-filter — anything containing a long digit sequence (postal codes), a street address word, a URL, or a DOI prefix is rejected immediately. Candidates that survive must contain at least one organisation indicator (university, institute, lab, GmbH, Ltd, etc.). The surviving candidates are then each searched on DuckDuckGo with the topic appended, and the top-4 result pages are fetched and checked: a candidate is accepted only if any of those pages contains at least two of the configured topic keywords. This means a candidate like "Department of Chemistry, University of Bologna" gets rejected if its web page has no signal for organic bioelectronics, but a less well-known lab working specifically on plant electrodes gets accepted because their page contains "OECT", "conducting polymer", "plant" — the relevant keywords.
 
-After verification, only confirmed candidates reach the LLM. The prompt shows the model the full topic description, lists the already-known entities, and asks it to classify and deduplicate the verified list: clean official name, entity type, and a one-sentence description of their relevance. The model never sees the raw paper text or the unverified candidate pool — it receives only the already-vetted set. This keeps the LLM call focused and makes hallucination much less likely.
+After verification, the pipeline deduplicates the candidate list by URL — two affiliation strings that resolved to the same page are collapsed into one — and then runs two sequential LLM calls. The first is a binary relevance check: the model receives the numbered candidate list and the topic description and returns a yes/no decision with a one-line reason for each candidate. This decision is logged to stdout and is the only filtering step. Candidates that are not reviewed (which can happen if the model skips an index) are included by default rather than silently dropped. The second call receives only the candidates that passed and formats them into structured entity records: clean official name, entity type, and a one-sentence relevance note. To help the model produce accurate names rather than copying the raw affiliation string, each candidate entry includes the page title (preferring `og:site_name`, then h1, then `<title>`) and the first 200 characters of page body text captured during verification. The model never sees the raw paper text or the unverified candidate pool.
 
 The final output is a list of new entity dicts that feed directly into the scraping step. At the end of a run, both the CLI and the Streamlit UI offer to save discovered entities back to the input CSV, so they become permanent seed entities for future runs.
 
@@ -46,7 +46,7 @@ With a seed entity list established (either from the CSV directly or augmented b
 
 **Enrichment** runs three targeted follow-up passes per entity, each involving its own DuckDuckGo search and a focused LLM call. The first extracts a concise description of how the entity applies its technology specifically to living plants — or returns null if no plant-specific signal is found. The second identifies notable outputs (papers, patents, products, tools, datasets), asking the model to return structured objects with type, title, and year, then attempts link resolution: papers are looked up via the Semantic Scholar API (falling back to a DOI URL if found), patents are mapped to Google Patents search URLs. The third extracts key researchers and principal investigators by name and role. Each pass uses a query-shortening function that strips stopwords from long academic entity names before constructing the DuckDuckGo query, to avoid the search engine treating the full name as too literal and returning nothing. If a page context comes back with fewer than 500 characters, the LLM call is skipped to avoid noise. Results cached in `data/enriched/`.
 
-**Report generation** takes the enriched dataset, sorts entities by relevance score descending, and produces a self-contained HTML file. Each entity gets a card with colour-coded badges for its development stage and competitive position, a relevance score rendered as filled and empty dots, a highlighted summary block, and a two-column detail grid covering technology focus, domain application, key people, and notable outputs. Output links are rendered as clickable anchors where link resolution succeeded. The report header includes aggregate counts (total entities, companies and spinoffs, academic and research, other) and the generation date. The whole thing is a single file — no dependencies, fully offline once generated.
+**Report generation** takes the enriched dataset, sorts entities by relevance score descending, and produces a self-contained HTML file. Each entity gets a card with colour-coded badges for its development stage and competitive position, a relevance score rendered as filled and empty dots, a highlighted summary block, and a two-column detail grid covering technology focus, domain application, key people, and notable outputs. The entity name links to the primary URL where one is available. Output links in the notable outputs field are rendered as clickable anchors where link resolution succeeded. The report header includes aggregate counts (total entities, companies and spinoffs, academic and research, other) and the generation date. The whole thing is a single file — no dependencies, fully offline once generated.
 
 <!-- SCREENSHOT: example HTML report showing two or three entity cards with badges, score dots, and clickable output links -->
 
@@ -174,7 +174,7 @@ python main.py --discover --force-discover --skip-scrape
 competitive-intelligence/
 ├── config.py           # LLM backend, topic defaults, discovery queries and keywords
 ├── csv_loader.py       # CSV parsing, save_discovered_to_csv()
-├── scraper.py          # Fetch and clean text from entity URLs, cache to data/raw/
+├── scraper.py          # Fetch and clean text from entity URLs
 ├── analyzer.py         # LLM structured extraction per entity, Ollama + Claude backends
 ├── enricher.py         # Three targeted DDG+LLM passes, Semantic Scholar link resolution
 ├── discoverer.py       # Discovery: DDG → affiliation regex → keyword verification → LLM
@@ -183,12 +183,7 @@ competitive-intelligence/
 ├── app_ui.py           # Streamlit UI
 ├── requirements.txt
 └── data/
-    ├── input/          # CSV topic files
-    ├── raw/            # Cached scraped text (per entity)
-    ├── analyzed/       # Cached LLM extraction output (per entity)
-    ├── enriched/       # Cached enrichment output (per entity)
-    └── reports/        # Generated HTML reports
-└── assets/             # Screenshots
+    └── input/          # Topic CSV files (one per landscape)
 ```
 
 ---

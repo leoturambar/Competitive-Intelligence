@@ -51,7 +51,7 @@ def _fetch_url(url: str) -> str:
         return ""
 
 
-def scrape_all(force: bool = False, extra_entities: list = None) -> dict:
+def scrape_all(force: bool = False, extra_entities: list = None, on_progress=None) -> dict:
     """
     Scrape all entities defined in config, plus any extra_entities
     passed in (e.g. from discoverer.py).
@@ -63,8 +63,9 @@ def scrape_all(force: bool = False, extra_entities: list = None) -> dict:
     results = {}
 
     all_entities = list(config.ENTITIES) + (extra_entities or [])
+    total = len(all_entities)
 
-    for entity in all_entities:
+    for i, entity in enumerate(all_entities):
         name  = entity["name"]
         slug  = re.sub(r"[^a-z0-9]+", "_", name.lower())[:60]
         cache = RAW_DIR / f"{slug}.json"
@@ -103,6 +104,8 @@ def scrape_all(force: bool = False, extra_entities: list = None) -> dict:
             json.dump(payload, f, indent=2)
 
         results[name] = payload
+        if on_progress:
+            on_progress(i + 1, total)
 
     return results
 

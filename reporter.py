@@ -126,6 +126,8 @@ def _render_outputs(outputs) -> str:
 
 def _entity_card(e: dict) -> str:
     name     = e.get("entity_name", "Unknown")
+    urls     = e.get("entity_urls") or []
+    primary  = urls[0] if urls else None
     etype    = e.get("entity_type", "Other")
     icon     = TYPE_ICONS.get(etype, "•")
     country  = _format_value(e.get("country"))
@@ -139,13 +141,18 @@ def _entity_card(e: dict) -> str:
     funding  = _format_value(e.get("funding_or_status"))
     people   = _format_value(e.get("key_people"))
     outputs  = _render_outputs(e.get("notable_outputs"))
+    name_html = (
+        f'<a href="{primary}" target="_blank" rel="noopener" '
+        f'style="color:inherit;text-decoration:none;border-bottom:1px dotted #888">{name}</a>'
+        if primary else name
+    )
 
     return f"""
 <div class="card">
   <div class="card-header">
     <div>
       <span class="entity-icon">{icon}</span>
-      <span class="entity-name">{name}</span>
+      <span class="entity-name">{name_html}</span>
     </div>
     <div class="badges">
       {_badge(etype, "#eaf2ff", "#1a5276")}

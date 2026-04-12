@@ -140,12 +140,14 @@ def run(
     if skip_scrape:
         print("[STEP 1] Scraping SKIPPED (loading from cache only)")
         _write_status("scraping", "loading from cache", done=True)
-        scraped = scrape_all(force=False, extra_entities=extra_entities)
+        scraped = scrape_all(force=False, extra_entities=extra_entities,
+                             on_progress=lambda i, t: _write_status("scraping", f"{i} / {t} entities"))
     else:
         n_total = len(config.ENTITIES) + len(extra_entities)
         print("[STEP 1] Scraping entity pages...")
         _write_status("scraping", f"0 / {n_total} entities")
-        scraped = scrape_all(force=force_scrape, extra_entities=extra_entities)
+        scraped = scrape_all(force=force_scrape, extra_entities=extra_entities,
+                             on_progress=lambda i, t: _write_status("scraping", f"{i} / {t} entities"))
         msg = f"{len(scraped)} entities scraped"
         print(f"         -> {msg}\n")
         _write_status("scraping", msg, done=True)
@@ -153,7 +155,8 @@ def run(
     # ── Step 2: Analyze ─────────────────────────────────
     print("[STEP 2] Analysing with LLM...")
     _write_status("analysis", f"0 / {len(scraped)} entities")
-    analyzed = analyze_all(scraped, force=force_analyze)
+    analyzed = analyze_all(scraped, force=force_analyze,
+                           on_progress=lambda i, t: _write_status("analysis", f"{i} / {t} entities"))
     msg = f"{len(analyzed)} entities analysed"
     print(f"         -> {msg}\n")
     _write_status("analysis", msg, done=True)
@@ -166,7 +169,8 @@ def run(
     else:
         print("[STEP 3] Enriching (plant application, outputs, people)...")
         _write_status("enrichment", f"0 / {len(analyzed)} entities")
-        final = enrich_all(analyzed, force=force_enrich)
+        final = enrich_all(analyzed, force=force_enrich,
+                           on_progress=lambda i, t: _write_status("enrichment", f"{i} / {t} entities"))
         msg = f"{len(final)} entities enriched"
         print(f"         -> {msg}\n")
         _write_status("enrichment", msg, done=True)

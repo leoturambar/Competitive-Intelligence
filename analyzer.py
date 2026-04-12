@@ -116,7 +116,7 @@ def _parse_json(raw: str) -> dict:
 
 # ── Main function ─────────────────────────────
 
-def analyze_all(scraped: dict, force: bool = False) -> dict:
+def analyze_all(scraped: dict, force: bool = False, on_progress=None) -> dict:
     """
     Run LLM analysis on all scraped entities.
     Results cached in data/analyzed/<slug>.json.
@@ -124,8 +124,9 @@ def analyze_all(scraped: dict, force: bool = False) -> dict:
     """
     ANALYZED_DIR.mkdir(parents=True, exist_ok=True)
     results = {}
+    total = len(scraped)
 
-    for name, data in scraped.items():
+    for i, (name, data) in enumerate(scraped.items()):
         slug  = re.sub(r"[^a-z0-9]+", "_", name.lower())[:60]
         cache = ANALYZED_DIR / f"{slug}.json"
 
@@ -142,22 +143,27 @@ def analyze_all(scraped: dict, force: bool = False) -> dict:
             print(f"    [WARN] No text available — filling with nulls.")
             structured = {f: None for f in OUTPUT_FIELDS}
             structured["entity_name"] = name
+            structured["entity_urls"] = data.get("urls", [])
         else:
             prompt = _build_prompt(name, raw_text)
             try:
                 raw_response = _call_llm(prompt)
                 structured   = _parse_json(raw_response)
                 structured["entity_name"] = name
+                structured["entity_urls"] = data.get("urls", [])
             except Exception as e:
                 print(f"    [ERROR] LLM failed for {name}: {e}")
                 structured = {f: None for f in config.OUTPUT_FIELDS}
                 structured["entity_name"] = name
+                structured["entity_urls"] = data.get("urls", [])
                 structured["summary"] = f"Analysis failed: {e}"
 
         with open(cache, "w") as f:
             json.dump(structured, f, indent=2)
 
         results[name] = structured
+        if on_progress:
+            on_progress(i + 1, total)
 
     return results
 
