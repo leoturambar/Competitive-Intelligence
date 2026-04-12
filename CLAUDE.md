@@ -19,9 +19,9 @@ Python · requests · BeautifulSoup4 · Anthropic API (claude-sonnet) · Ollama 
 - discoverer.py — auto-discover new entities via DDG + affiliation extraction +
   LLM verification
 - reporter.py — JSON → formatted HTML report
-- data/input/ — CSV topic files (tracked in git)
-- data/raw|analyzed|enriched/ — caches (not tracked in git)
-- data/reports/ — generated HTML reports (not tracked in git)
+- data/input/ — CSV topic files (gitignored, not tracked)
+- data/raw|analyzed|enriched/ — caches (gitignored, not tracked)
+- data/reports/ — generated HTML reports (gitignored, not tracked)
 
 ## Key logic
 The discovery pipeline is the most complex part (discoverer.py):
@@ -41,7 +41,6 @@ Streamlit UI. Backend selection is in config.py and via UI toggle.
 - Write all code and docstrings in English
 - Never modify config files containing API keys or credentials
 - Do not push sensitive data, keys, or personal content to git
-- data/raw/, data/analyzed/, data/enriched/, data/reports/ are gitignored —
-  do not add them
+- the entire data/ directory is gitignored — do not force-add any files from it
 - Ask before changing the pipeline orchestration in main.py
 - Ask before changing the HTML report structure in reporter.py
