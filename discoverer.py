@@ -147,7 +147,7 @@ def _verify_affiliation(affiliation: str, topic: str) -> dict | None:
     Verify that an affiliation string corresponds to a real organisation
     working on the topic by searching DDG and checking page content.
 
-    Returns {"name": cleaned_name, "url": url} if verified, None otherwise.
+    Returns {"name", "url", "page_title", "page_snippet"} if verified, None otherwise.
     """
     # Quick pre-filter: reject obvious non-organisations
     noise_patterns = [
@@ -175,18 +175,45 @@ def _verify_affiliation(affiliation: str, topic: str) -> dict | None:
     # DDG verification search
     query = f"{affiliation} {topic}"
     print(f"    [VERIFY] {affiliation[:60]}...")
-    links = _ddg_links(query, max_results=2)
+    links = _ddg_links(query, max_results=4)
 
     for url in links:
-        text = _fetch_text(url, max_chars=3000)
+        headers = {"User-Agent": random.choice(UA_LIST)}
+        try:
+            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # Build a rich naming hint from multiple signals
+            og_site = soup.find("meta", property="og:site_name")
+            h1_tag  = soup.find("h1")
+            ttl_tag = soup.find("title")
+            page_title = (
+                re.sub(r"\s+", " ", og_site["content"]).strip()[:100]
+                if og_site and og_site.get("content") else
+                re.sub(r"\s+", " ", h1_tag.get_text()).strip()[:100]
+                if h1_tag else
+                re.sub(r"\s+", " ", ttl_tag.get_text()).strip()[:100]
+                if ttl_tag else ""
+            )
+            # Strip noise, get text for keyword check and body snippet
+            for tag in soup(["script", "style", "nav", "footer", "header",
+                             "aside", "form", "noscript", "iframe", "svg"]):
+                tag.decompose()
+            text = re.sub(r"\s+", " ", soup.get_text(separator=" ")).strip()[:3000]
+            page_snippet = text[:300]
+        except Exception as e:
+            print(f"    [WARN] Fetch failed {url}: {e}")
+            time.sleep(REQUEST_DELAY)
+            continue
         if not text:
+            time.sleep(REQUEST_DELAY)
             continue
         text_lower = text.lower()
-        # Check that the page is actually relevant to the topic
         keyword_hits = sum(1 for kw in TOPIC_KEYWORDS if kw.lower() in text_lower)
         if keyword_hits >= 2:
             print(f"             OK  ({keyword_hits} keyword hits) -> {url}")
-            return {"name": affiliation, "url": url}
+            return {"name": affiliation, "url": url,
+                    "page_title": page_title, "page_snippet": page_snippet}
         time.sleep(REQUEST_DELAY)
 
     return None
@@ -325,6 +352,19 @@ def discover(force: bool = False, on_status=None) -> list:
 
     print(f"  [DISCOVER] {len(verified)} verified candidates")
 
+    # Dedup by URL — same page found via different affiliation strings = same entity
+    seen_verified_urls: dict = {}
+    deduped = []
+    for v in verified:
+        if v["url"] not in seen_verified_urls:
+            seen_verified_urls[v["url"]] = v["name"]
+            deduped.append(v)
+        else:
+            print(f"  [DEDUP] {v['name'][:55]} → same URL as '{seen_verified_urls[v['url']][:40]}'")
+    if len(deduped) < len(verified):
+        print(f"  [DISCOVER] {len(deduped)} unique candidates after dedup")
+    verified = deduped
+
     if not verified:
         print("  [WARN] No candidates passed verification")
         Path("data").mkdir(exist_ok=True)
@@ -332,38 +372,103 @@ def discover(force: bool = False, on_status=None) -> list:
             json.dump([], f)
         return []
 
-    # ── Step 4: LLM classifies verified candidates ─────────
-    print("  [DISCOVER] Classifying with LLM...")
+    # ── Step 4a: LLM relevance check ──────────────────────
+    print("  [DISCOVER] Checking relevance with LLM...")
 
-    already_known = "\n".join(f"- {e['name']}" for e in ENTITIES)
-    candidate_block = "\n".join(
-        f"- {v['name']}  (verified URL: {v['url']})"
-        for v in verified
+    already_known  = "\n".join(f"- {e['name']}" for e in ENTITIES)
+    numbered_block = "\n".join(
+        f"{idx + 1}. {v['name']}  ({v['url']})"
+        for idx, v in enumerate(verified)
     )
 
-    prompt = f"""You are an expert analyst in {TOPIC}.
+    relevance_prompt = f"""You are an expert analyst in {TOPIC}.
 
-Context:
 {TOPIC_DESCRIPTION}
 
-These research organisations have been verified as working on {TOPIC}
-(each was confirmed by finding relevant topic keywords on their web page):
+For each organisation below, decide whether it directly works on {TOPIC} —
+not just adjacent or tangentially related.
+Base your decision on what can reasonably be inferred from the name, URL,
+and the context description above.
+
+{numbered_block}
+
+Return ONLY:
+{{"checks": [
+  {{"index": 1, "relevant": true, "reason": "one line"}},
+  ...
+]}}
+One entry per organisation, same order. No preamble, no markdown fences."""
+
+    try:
+        raw    = _call_llm(relevance_prompt)
+        data   = _parse_json(raw)
+        checks = data.get("checks", [])
+    except Exception as e:
+        print(f"  [ERROR] LLM relevance check failed: {e}")
+        checks = []
+
+    # Filter by index; log every decision for debugging
+    relevant_verified = []
+    checked_indices   = set()
+    for chk in checks:
+        idx    = chk.get("index", 0)
+        keep   = chk.get("relevant", False)
+        reason = chk.get("reason", "")
+        if 1 <= idx <= len(verified):
+            checked_indices.add(idx)
+            candidate = verified[idx - 1]
+            tag = "[KEEP]" if keep else "[DROP]"
+            print(f"  {tag} {candidate['name'][:60]}: {reason}")
+            if keep:
+                relevant_verified.append(candidate)
+
+    # Fallback: include any candidates the LLM silently skipped
+    for idx, candidate in enumerate(verified, start=1):
+        if idx not in checked_indices:
+            print(f"  [KEEP] {candidate['name'][:60]}: (not reviewed — included by default)")
+            relevant_verified.append(candidate)
+
+    print(f"  [DISCOVER] {len(relevant_verified)} / {len(verified)} passed relevance check")
+
+    if not relevant_verified:
+        print("  [WARN] No candidates passed relevance check")
+        Path("data").mkdir(exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump([], f)
+        return []
+
+    # ── Step 4b: LLM formats relevant candidates ──────────
+    print("  [DISCOVER] Formatting with LLM...")
+
+    def _fmt_candidate(v: dict) -> str:
+        line = f"- {v['name']}  (URL: {v['url']}"
+        if v.get("page_title"):
+            line += f"  |  title: \"{v['page_title']}\""
+        if v.get("page_snippet"):
+            line += f"  |  text: \"{v['page_snippet'][:200]}\""
+        return line + ")"
+
+    candidate_block = "\n".join(_fmt_candidate(v) for v in relevant_verified)
+
+    format_prompt = f"""You are an expert analyst in {TOPIC}.
+
+Format the following verified and relevance-checked organisations as structured data.
 
 {candidate_block}
 
-From this list, select up to {DISCOVERY_N_NEW} organisations NOT already known:
-
+Already known — exclude only if name clearly matches:
 {already_known}
 
-For each selected entity return:
+For each included entity return:
 - "name": clean official name (e.g. "Uppsala University — Plant Bioelectronics Group")
 - "url": the verified URL provided above
 - "entity_type": Company | Spinoff | Research Institute | University | Consortium | Other
 - "notes": 1 sentence on what they do on {TOPIC}
 
 Rules:
-- Only use names and URLs from the verified list above
+- Only use names and URLs from the list above
 - Do NOT invent names or URLs
+- Include all unless clearly matching an already-known entity
 - If all are already known, return {{"new_entities": []}}
 
 Return ONLY:
@@ -374,11 +479,11 @@ Return ONLY:
 No preamble, no markdown fences."""
 
     try:
-        raw          = _call_llm(prompt)
+        raw          = _call_llm(format_prompt)
         data         = _parse_json(raw)
         raw_entities = data.get("new_entities", [])
     except Exception as e:
-        print(f"  [ERROR] LLM classification failed: {e}")
+        print(f"  [ERROR] LLM formatting failed: {e}")
         raw_entities = []
 
     # ── Step 5: build final entity list ───────────────────

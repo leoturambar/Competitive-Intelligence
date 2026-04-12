@@ -360,11 +360,12 @@ Text:
 
 # ── Main function ─────────────────────────────
 
-def enrich_all(analyzed: dict, force: bool = False) -> dict:
+def enrich_all(analyzed: dict, force: bool = False, on_progress=None) -> dict:
     ENRICHED_DIR.mkdir(parents=True, exist_ok=True)
     results = {}
+    total = len(analyzed)
 
-    for name, data in analyzed.items():
+    for i, (name, data) in enumerate(analyzed.items()):
         slug  = re.sub(r"[^a-z0-9]+", "_", name.lower())[:60]
         cache = ENRICHED_DIR / f"{slug}.json"
 
@@ -408,6 +409,8 @@ def enrich_all(analyzed: dict, force: bool = False) -> dict:
             json.dump(enriched, f, indent=2)
 
         results[name] = enriched
+        if on_progress:
+            on_progress(i + 1, total)
 
     return results
 
