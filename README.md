@@ -188,6 +188,7 @@ competitive-intelligence/
     ├── analyzed/       # Cached LLM extraction output (per entity)
     ├── enriched/       # Cached enrichment output (per entity)
     └── reports/        # Generated HTML reports
+└── assets/             # Screenshots
 ```
 
 ---
