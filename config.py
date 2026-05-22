@@ -6,7 +6,7 @@
 # Options: "ollama" | "claude"
 LLM_BACKEND = "ollama"
 
-OLLAMA_MODEL  = "qwen2.5:14b"
+OLLAMA_MODEL  = "qwen3.5:9b"
 CLAUDE_MODEL  = "claude-sonnet-4-5"
 CLAUDE_API_KEY = ""          # set here or in env var ANTHROPIC_API_KEY
 

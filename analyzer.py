@@ -48,13 +48,14 @@ Rules:
 # ── Ollama backend ────────────────────────────
 
 def _call_ollama(prompt: str) -> str:
-    resp = requests.post(
-        "http://localhost:11434/api/generate",
-        json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": False},
-        timeout=120,
+    from ollama import Client
+    client = Client(host="http://localhost:11434")
+    resp = client.chat(
+        model=config.OLLAMA_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        think=False,
     )
-    resp.raise_for_status()
-    return resp.json()["response"]
+    return resp.message.content
 
 
 # ── Claude backend ────────────────────────────
