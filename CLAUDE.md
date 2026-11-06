@@ -6,36 +6,45 @@ Scrapes public sources, extracts structured data via LLM, and generates a
 formatted HTML report. Topic and entities configurable via CSV.
 
 ## Stack
-Python · requests · BeautifulSoup4 · Anthropic API (claude-sonnet) · Ollama · Streamlit
+Python · requests · BeautifulSoup4 · Anthropic SDK · Ollama · OpenAlex API · Streamlit · pytest
 
 ## Project structure
-- main.py — entry point, orchestrates the full pipeline
-- app_ui.py — Streamlit UI with live milestone progress and flag controls
-- config.py — LLM backend selection, defaults for topic/queries/keywords
-- csv_loader.py — CSV parsing and save_discovered_to_csv()
-- scraper.py — fetch and clean text from entity URLs
-- analyzer.py — LLM call per entity → structured JSON
-- enricher.py — targeted DDG passes for domain, outputs, key people
-- discoverer.py — auto-discover new entities via DDG + affiliation extraction +
-  LLM verification
-- reporter.py — JSON → formatted HTML report
-- data/input/ — CSV topic files (gitignored, not tracked)
-- data/raw|analyzed|enriched/ — caches (gitignored, not tracked)
-- data/reports/ — generated HTML reports (gitignored, not tracked)
+- main.py — CLI, orchestrates the pipeline (discovery → scraping → analysis → enrichment → landscape → report)
+- app_ui.py — Streamlit app: projects, run with live progress/log, results explorer, discovery review
+- config.py — defaults (backend, models, topic, delays); user-owned, don't edit
+- project.py — Project model (one per topic CSV), per-project paths, fingerprinted cache helpers, Status
+- csv_loader.py — robust CSV read/write, save_discovered_to_csv()
+- web.py — shared HTTP session, per-host rate limit, HTML cleaning, search (Brave API → DDG html → DDG lite) with circuit breaker
+- llm.py — single LLM entry point (call_json with JSON schema), Ollama + Claude backends, tolerant parsing
+- openalex.py — institution matching, topic activity, paper lookup, bibliometric discovery (cached 14 days)
+- scraper.py — homepage search for URL-less entities, multi-page scraping
+- analyzer.py — schema-constrained extraction + normalize()
+- enricher.py — OpenAlex research profile, web-intelligence pass, link resolution, merging
+- discoverer.py — OpenAlex + web-affiliation discovery, verification funnel, decision log
+- landscape.py — cross-entity stats and synthesis
+- reporter.py — self-contained interactive HTML report (+ CSV/JSON)
+- tests/ — offline unit tests (python -m pytest tests)
+- data/ — gitignored: input/ CSVs, projects/<slug>/ caches and reports, cache/openalex
 
 ## Key logic
-The discovery pipeline is the most complex part (discoverer.py):
-DDG search → regex affiliation extraction from paper text → keyword
-verification → LLM classification against known entity list.
-Do not simplify this pipeline without explicit instruction.
+Discovery (discoverer.py) has two candidate sources: OpenAlex institutions publishing on
+the topic, and the original DDG → regex affiliation → verification pipeline (now rejecting
+aggregator pages and requiring the candidate's name on the page). Both feed dedupe →
+LLM relevance check → index-based LLM naming. Do not simplify this pipeline without
+explicit instruction.
 
-Caching is intentional and load-bearing — each step caches to JSON so
-subsequent runs skip completed steps. Do not remove or bypass caching logic.
+Caching is intentional and load-bearing. Each project has its own cache under
+data/projects/<slug>/; each file stores a fingerprint of its inputs (project.fingerprint),
+so input changes invalidate exactly the dependent layers. Do not remove or bypass it;
+bump CACHE_VERSION / ENRICH_VERSION when a cached schema changes.
+
+All LLM output that reaches the report is inserted via textContent/escaping in
+reporter.py's template — keep it that way.
 
 ## LLM backend
-Two backends supported and selectable at runtime: Ollama (default, local,
-Qwen2.5:14b) and Claude (Anthropic API, claude-sonnet). Both work in the
-Streamlit UI. Backend selection is in config.py and via UI toggle.
+Ollama (default, local, qwen3.5:9b, num_ctx 16k) and Claude (Anthropic SDK, structured
+outputs, effort via CI_CLAUDE_EFFORT). Selectable in config.py, the app sidebar,
+--backend/--model, or CI_LLM_BACKEND / CI_OLLAMA_MODEL / CI_CLAUDE_MODEL.
 
 ## Rules
 - Write all code and docstrings in English
