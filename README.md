@@ -1,100 +1,120 @@
 # Competitive Intelligence Tool
 
-An automated pipeline for mapping a niche scientific or technical landscape — given a topic and a seed list of entities, it scrapes public sources, extracts structured data through an LLM, enriches the results with targeted follow-up searches, and produces a formatted HTML report ready to read, share, or iterate on.
+An automated pipeline for mapping a niche scientific or technical landscape. Give it a topic and a few seed organisations; it reads their websites, pulls publication data from OpenAlex, mines news for funding and partnerships, finds organisations you missed, and produces an interactive report that says not only *who* is out there but *what it means*: who leads, how the field is segmented, where the commercial activity is, and where the gaps are.
 
-<!-- SCREENSHOT: Streamlit UI showing input configuration and live milestone panel -->
+<!-- SCREENSHOT: report Overview tab — KPIs, executive summary, key players, research momentum -->
 
 ---
 
 ## The problem
 
-Mapping a competitive or research landscape in a niche technical field is slow work. You search, read, summarise, and repeat — and for topics like organic bioelectronics or plant-interfacing devices, the situation is worse than average: most search results are academic papers rather than company pages. Standard intelligence tools either miss the academic layer entirely or produce noise because they have no domain context.
+Mapping a competitive or research landscape in a niche technical field is slow work. You search, read, summarise, and repeat — and for topics like organic bioelectronics or plant-interfacing devices, the situation is worse than average: most of the field's footprint is papers and lab pages, not company sites. Standard intelligence tools either miss the academic layer entirely or produce noise because they have no domain context.
 
-This is the problem I kept running into as a researcher with a background in life science and deeptech. The niche I used to prototype this tool — organic electronics applied to living plants — has exactly this structure: a small global community, most of its footprint in the form of papers and lab pages, and almost no representation in the usual startup or market databases.
-
-The tool turns that constraint into a feature. Academic papers carry author affiliations, and affiliations name the labs and institutes doing the work. If you can extract and verify those affiliation strings, you have a discovery signal that works *because* the field is niche and paper-heavy — which is precisely when other approaches fail.
+The tool turns that constraint into a feature. A paper-heavy field leaves a precise bibliometric trail — who publishes on the topic, how much, how recently, and with whom — and that trail is a far better discovery and ranking signal than keyword search alone.
 
 ---
 
-## The discovery pipeline
+## What you get
 
-This is the most technically interesting part of the project. Running it is optional, but it is the thing that made me want to build this in the first place.
+**An interactive, self-contained HTML report** (one file, works offline, prints cleanly):
 
-When you pass `--discover`, the pipeline runs a set of configurable DuckDuckGo searches — queries like "plant bioelectronics company startup" or "OECT plant interface research". The raw HTML from each result page is fetched and cleaned down to plain text. So far, fairly standard. The non-obvious step is what happens next.
+| Tab | What it shows |
+|---|---|
+| **Overview** | KPIs, an executive summary, key players with the reason they matter, technology/application segments, trends, white spaces, a watchlist of emerging players, and research momentum |
+| **Landscape** | Positioning map (development stage × relevance, sized by publication output, coloured by industry / academic / other) and distributions by type, stage and country — click any bar to filter |
+| **Entities** | Searchable, filterable, sortable table (or card view) with per-entity publication sparklines; click a row for a full profile: summary, technology, application, business model, funding, strengths & risks, dated recent developments, research profile, key people, notable outputs with verified links, and every source used |
+| **Compare** | Up to four organisations side by side |
+| **Sources & method** | How the report was built, data-quality flags (non-organisations, thin evidence), discovered entities |
 
-Academic papers typically cluster their affiliation section near the top of the document, using a predictable typographic structure: numbered or lettered superscripts followed by institution names. The `_regex_affiliations` function exploits this by sliding a 400-word window across the full page text and scoring each position by how many affiliation markers it contains — words like "university", "institute", "laboratory", "center". It keeps the highest-density window and then applies four regex patterns to pull out candidate organization strings. The result is a raw list of up to 30 affiliation-like strings per page, most of which are real institutions and some of which are postal addresses, DOI fragments, or other noise.
+Every report is also exported as **CSV** and **JSON** next to the HTML.
 
-The verification step filters this down. Each candidate string is passed through a noise pre-filter — anything containing a long digit sequence (postal codes), a street address word, a URL, or a DOI prefix is rejected immediately. Candidates that survive must contain at least one organisation indicator (university, institute, lab, GmbH, Ltd, etc.). The surviving candidates are then each searched on DuckDuckGo with the topic appended, and the top-4 result pages are fetched and checked: a candidate is accepted only if any of those pages contains at least two of the configured topic keywords. This means a candidate like "Department of Chemistry, University of Bologna" gets rejected if its web page has no signal for organic bioelectronics, but a less well-known lab working specifically on plant electrodes gets accepted because their page contains "OECT", "conducting polymer", "plant" — the relevant keywords.
-
-After verification, the pipeline deduplicates the candidate list by URL — two affiliation strings that resolved to the same page are collapsed into one — and then runs two sequential LLM calls. The first is a binary relevance check: the model receives the numbered candidate list and the topic description and returns a yes/no decision with a one-line reason for each candidate. This decision is logged to stdout and is the only filtering step. Candidates that are not reviewed (which can happen if the model skips an index) are included by default rather than silently dropped. The second call receives only the candidates that passed and formats them into structured entity records: clean official name, entity type, and a one-sentence relevance note. To help the model produce accurate names rather than copying the raw affiliation string, each candidate entry includes the page title (preferring `og:site_name`, then h1, then `<title>`) and the first 200 characters of page body text captured during verification. The model never sees the raw paper text or the unverified candidate pool.
-
-The final output is a list of new entity dicts that feed directly into the scraping step. At the end of a run, both the CLI and the Streamlit UI offer to save discovered entities back to the input CSV, so they become permanent seed entities for future runs.
-
-If the initial DuckDuckGo queries return no usable pages, the pipeline makes a fallback LLM call to generate three alternative search queries with different terminology, then retries. Discovery results are cached in `data/discovered.json` and only re-run when explicitly forced.
-
-<!-- SCREENSHOT: terminal output showing the discovery step: DDG queries, candidate extraction, verification with keyword hit counts, LLM classification -->
+**A Streamlit app** to create and edit projects, run the pipeline with live progress and logs, explore results, preview the report, and review discovered organisations one by one.
 
 ---
 
-## The rest of the pipeline
+## The pipeline
 
-With a seed entity list established (either from the CSV directly or augmented by discovery), the pipeline runs four steps in sequence.
-
-**Scraping** fetches each entity's configured URLs, strips navigation, headers, footers, scripts, and other structural noise using BeautifulSoup, and collapses the remaining text. Multiple URLs per entity are supported and concatenated. If an entity has no URL, it is included with whatever context comes from its notes field. Each entity's text is truncated to 8,000 characters before being passed downstream — enough for the LLM to work with, not so much that it dominates a context window. Random user-agent rotation and configurable delays between requests avoid rate limiting. All scraped output is cached per-entity as JSON in `data/raw/`.
-
-**Analysis** runs one LLM call per entity with a structured extraction prompt that includes the topic description as grounding context. The model returns a JSON object with twelve fields: entity type (Company, Spinoff, Research Institute, University, Consortium, or Other), country, founding date, technology focus, domain application, development stage (Research / Prototype / Pilot / Commercial), funding or status, key people, notable outputs, competitive position (Leader, Strong player, Niche player, Adjacent, Early stage), a relevance score from 1 to 5, and a two-to-three sentence summary. The parser tolerates partial responses — it strips markdown fences, tries standard JSON parsing, then falls back to scanning for the last valid closing brace. Failures fill with nulls rather than crashing. Results cached in `data/analyzed/`.
-
-**Enrichment** runs three targeted follow-up passes per entity, each involving its own DuckDuckGo search and a focused LLM call. The first extracts a concise description of how the entity applies its technology specifically to living plants — or returns null if no plant-specific signal is found. The second identifies notable outputs (papers, patents, products, tools, datasets), asking the model to return structured objects with type, title, and year, then attempts link resolution: papers are looked up via the Semantic Scholar API (falling back to a DOI URL if found), patents are mapped to Google Patents search URLs. The third extracts key researchers and principal investigators by name and role. Each pass uses a query-shortening function that strips stopwords from long academic entity names before constructing the DuckDuckGo query, to avoid the search engine treating the full name as too literal and returning nothing. If a page context comes back with fewer than 500 characters, the LLM call is skipped to avoid noise. Results cached in `data/enriched/`.
-
-**Report generation** takes the enriched dataset, sorts entities by relevance score descending, and produces a self-contained HTML file. Each entity gets a card with colour-coded badges for its development stage and competitive position, a relevance score rendered as filled and empty dots, a highlighted summary block, and a two-column detail grid covering technology focus, domain application, key people, and notable outputs. The entity name links to the primary URL where one is available. Output links in the notable outputs field are rendered as clickable anchors where link resolution succeeded. The report header includes aggregate counts (total entities, companies and spinoffs, academic and research, other) and the generation date. The whole thing is a single file — no dependencies, fully offline once generated.
-
-<!-- SCREENSHOT: example HTML report showing two or three entity cards with badges, score dots, and clickable output links -->
-
----
-
-## LLM backends
-
-Two backends are supported and switchable at runtime, either in `config.py` or via the `CI_LLM_BACKEND` environment variable (which the Streamlit UI sets automatically based on your selection).
-
-```python
-LLM_BACKEND = "ollama"   # default — local inference, no API cost
-LLM_BACKEND = "claude"   # Anthropic API — more reliable on enrichment
+```
+[discovery] → scraping → analysis → enrichment → landscape synthesis → report
 ```
 
-The Ollama backend calls a locally running Ollama server at `http://localhost:11434` with `qwen2.5:14b` as the default model. It works well for the structured extraction step, where the task is clearly specified and the output format is constrained. It is free, runs offline, and is fast enough that you can iterate through a ten-entity list in a few minutes.
+### Discovery (optional)
 
-The Claude backend calls `claude-sonnet-4-5` via the Anthropic API. The improvement shows most clearly during enrichment, where the LLM is making judgment calls about relevance, resolving ambiguous affiliation text, and synthesising across two or three web pages that may partially contradict each other. Hallucination risk is higher in those passes because the context is messier, and Claude's instruction-following and refusal to fabricate are noticeably stronger there. The cost for a typical ten-entity run is small — a few cents — but it is worth knowing when it adds value.
+Two independent candidate sources feed one verification funnel.
 
-To use the Claude backend, set the API key once as a persistent system environment variable:
+**A. Bibliometric (OpenAlex).** Works whose title or abstract match the topic in the last eight years are grouped by author institution. Institutions with at least two papers become candidates, carrying their publication count and homepage as evidence. For the plant-bioelectronics prototype this immediately surfaces the real community — Linköping, the Swedish University of Agricultural Sciences, Umeå Plant Science Centre, Wallenberg Wood Science Center — with no noise from addresses or journal pages.
 
-```bash
-setx ANTHROPIC_API_KEY "sk-ant-..."
-```
+**B. Web affiliations.** The original pipeline, kept and hardened. DuckDuckGo searches collect paper and lab pages; `_regex_affiliations` slides a 400-word window over each page, keeps the region densest in affiliation markers, and pulls candidate organisation strings with four regex patterns. A pre-filter rejects postal addresses, "Find articles by…", DOIs and URLs. Each survivor is searched again with the topic appended and accepted only if a result page (1) is not an aggregator — journals, PubMed, ResearchGate, Wikipedia, LinkedIn and similar never count as an organisation's homepage — (2) mentions the candidate's own distinctive name words, and (3) contains at least two topic keywords. Conditions (1) and (2) fix the v1 failure mode where an affiliation string was "verified" by an unrelated page (e.g. a São Carlos affiliation resolving to a KAUST page).
 
-Reopen the terminal after running `setx`. Alternatively, set `CLAUDE_API_KEY` directly in `config.py`.
+**Funnel.** Candidates from both sources are deduplicated against known entities (by distinctive name tokens and by domain) and against each other, ranked by evidence, then reviewed by the LLM in two calls: a relevance check that also confirms the candidate is a real organisation, and a naming pass that produces a clean official name, type and one-line note. The naming pass works by index, so the model can never invent a name or URL. Every candidate and every decision — kept, dropped as not relevant, not verified, already known, duplicate — is logged to `discovery.json` and shown in the app, where you accept or dismiss each proposal. Accepted ones are appended to the project CSV.
+
+### Scraping
+
+Each entity's URLs are fetched (multiple URLs per entity supported). From the first page the scraper follows up to two internal *about / team / research / technology / products* links, so the model sees more than a landing page. Pages are cleaned of navigation, footers, scripts and cookie banners, preferring the `<main>`/`<article>` region. Entities with no URL get their homepage searched automatically (aggregators excluded, result must share name words with the entity). Requests are pooled, retried, and rate-limited per host; entities are scraped in parallel. A per-source log (URL, title, characters, errors) is kept and shown in the report.
+
+### Analysis
+
+One LLM call per entity, constrained by a JSON schema on both backends (Ollama structured outputs / Claude structured outputs), and instructed to use only the source text. Fields: identity check (organisation / research group / not an organisation), official name, type, country, city, founding date, technology focus, domain application, development stage, business model, funding/status, key people with roles, notable outputs, competitive position, a calibrated 1–5 relevance score *with a one-line rationale*, strengths, risks, tags, summary, and an evidence-quality rating. Results are normalised (enum matching, score clamping, list dedupe), so the report never has to guess. Failed analyses are not cached — they are retried on the next run instead of being frozen as "Analysis failed".
+
+### Enrichment
+
+Generic for any topic (v1's prompts were hard-wired to "living plants"):
+
+- **Research profile (OpenAlex)** — the entity is matched to an OpenAlex institution (every distinctive word of the institution's name must appear in the entity's name, or the homepage domains must match). For the match: topic-filtered paper counts per year for the last decade, three-year momentum, the most-cited topic papers with real DOIs, and the most active authors on the topic. For Linköping this returns Eleni Stavrinidou and Magnus Berggren as the top authors — exactly right.
+- **Web intelligence** — one news/funding/partnership search plus the entity's own pages, in a single LLM call extracting dated recent developments, funding, partners, a sharper domain application, and extra people and outputs.
+- **Link resolution** — papers are looked up on OpenAlex and linked only on a close title match (v1 took Semantic Scholar's first hit, which was often a different paper); patents with a number link to Google Patents; products link to the website. People and outputs from all sources are merged and deduplicated.
+
+### Landscape synthesis
+
+Deterministic statistics (by type, stage, position, country; core players; total topic papers) plus one LLM pass over compact entity profiles producing the executive summary, key players, segments, trends, white spaces and watchlist. Organisation names in the output are validated against the mapped list, so the synthesis can only talk about organisations that are actually in the report.
 
 ---
 
 ## Caching
 
-Every step writes its output to disk before the next step begins. On a re-run, each entity's cache file is checked first and the step is skipped if it exists. This means you can iterate quickly: change the LLM backend and re-run only analysis, add a new entity and re-run only for that entity, or skip straight to the report if enrichment already ran.
+Each topic CSV is a **project** with its own workspace:
 
-| Step | Cache location |
-|---|---|
-| Scraping | `data/raw/<slug>.json` |
-| Analysis | `data/analyzed/<slug>.json` |
-| Enrichment | `data/enriched/<slug>.json` |
-| Discovery | `data/discovered.json` |
+```
+data/projects/<slug>/
+    raw/ analyzed/ enriched/   one JSON per entity
+    discovery.json             proposals + full candidate log
+    landscape.json             synthesis
+    status.json  run.log       live progress (read by the app)
+    reports/                   report_<date>.html|.json|.csv
+```
 
-The slug is derived from the entity name by lowercasing and replacing non-alphanumeric characters with underscores, truncated to 60 characters. Per-step force flags (`--force-scrape`, `--force-analyze`, `--force-enrich`, `--force-discover`) let you invalidate one layer without touching the others. `--force` invalidates everything. The Streamlit UI exposes the same options as checkboxes.
+Every cache file stores a **fingerprint of the inputs that produced it**. Change an entity's URL or notes and only that entity is re-scraped and re-analysed; change the topic description and every LLM step is redone; switch model and analyses are redone with the new one. No more `--force` after editing inputs, and no more cross-topic contamination (in v1 all topics shared one cache, so an entity present in two topics reused the first topic's relevance score, and discovery results leaked between topics). Pages whose fetches all failed are retried on the next run. OpenAlex responses are cached for 14 days in `data/cache/openalex`.
 
-One thing the cache does not do is detect when your inputs change. If you update the topic description in `config.py` or add URLs to the CSV, the old cache files are still considered valid. Run `--force` after any meaningful input change.
+`--force` and the per-step `--force-*` flags still exist for refreshing stale web data.
+
+---
+
+## LLM backends
+
+| | Ollama (default) | Claude |
+|---|---|---|
+| Where | local, free, offline | Anthropic API |
+| Default model | `qwen3.5:9b` (`config.OLLAMA_MODEL`) | `config.CLAUDE_MODEL` |
+| Structured output | JSON-schema constrained decoding | `output_config.format` JSON schema |
+| Parallelism | sequential | 4 entities at a time |
+
+The Ollama context window is raised to 16k tokens (`CI_OLLAMA_NUM_CTX`); Ollama's small default silently truncated v1's long prompts. Backend and model can be switched in the app sidebar, with `--backend` / `--model`, or with the `CI_LLM_BACKEND`, `CI_OLLAMA_MODEL`, `CI_CLAUDE_MODEL` environment variables. Claude reads `ANTHROPIC_API_KEY` from the environment; `CI_CLAUDE_EFFORT` (default `low`) controls its effort level.
+
+---
+
+## Web search
+
+Search is used for homepage lookup, discovery verification and the news pass. It goes through DuckDuckGo's HTML endpoints, serialised and rate-limited. When DuckDuckGo answers with a bot check, that engine is paused for five minutes (a circuit breaker) and the run continues without it — OpenAlex data, websites and analysis are unaffected. For reliable search at volume, set a **Brave Search API** key (free tier ≈ 2,000 queries/month) and it is used first:
+
+```bash
+setx BRAVE_SEARCH_API_KEY "..."
+```
+
+Optionally set `OPENALEX_API_KEY` for a dedicated OpenAlex quota.
 
 ---
 
 ## Input format
-
-The topic and entity list live in a CSV file under `data/input/`. The file format uses hash-prefixed metadata lines before the header row, which lets the same file carry both configuration and data:
 
 ```csv
 #topic,organic bioelectronics for plants
@@ -103,26 +123,32 @@ The topic and entity list live in a CSV file under `data/input/`. The file forma
 #topic_keywords,bioelectron|OECT|plant|xylem|conducting polymer
 #domain_label,Plant application
 name,url,notes
-Linköping University — LOE,https://liu.se/en/research/organic-electronics,Pioneer group. Magnus Berggren.
-Vivent SA,https://www.vivent.ch,Swiss company. Electrical signal monitoring in plants.
-New Entity,,no URL yet — will be scraped via DDG fallback
+Linköping University — LOE,https://liu.se/en/research/organic-electronics,Pioneer group.
+Vivent SA,https://www.vivent.ch | https://www.vivent.ch/technology,Plant electrophysiology.
+New Entity,,no URL yet — the homepage will be searched
 ```
 
-The `#discovery_queries` and `#topic_keywords` lines override the defaults in `config.py` for this run, which means each topic CSV can carry its own domain-specific search vocabulary. The `|` character separates items within a field. Entities with no URL are still included — they contribute their notes text as context, and any discovered URL from the discovery pass gets attached at runtime. Discovered entities can be appended back to the file from the CLI prompt or the UI's save button.
+Metadata lines are parsed with the csv module, so quoted values and the trailing commas Excel adds are handled (in v1 they leaked into the topic and the last keyword, which then never matched). Several URLs per entity can be separated with `|`. Projects can be created and edited entirely from the app.
 
 ---
 
-## Streamlit UI
-
-The UI is a single-page Streamlit app that wraps the CLI without reimplementing anything. It lets you select a CSV from `data/input/`, choose between the Ollama and Claude backends, toggle individual pipeline steps on and off (scrape, analyze, enrich, report), enable or force the discovery pass, and optionally force a full cache refresh. Before running, it shows the exact command that will be executed.
-
-Progress is tracked through a milestone panel that polls `data/run_status.json` every 1.5 seconds. The status file is written by `main.py` at each pipeline transition and includes the current step, a detail string, and a timestamp. The UI renders it as a vertical list of steps, each marked as pending, running, done, or errored. After a run completes, a button opens the generated report in the browser. If discovery ran and found new entities, the UI lists them and offers a save button.
-
-<!-- SCREENSHOT: Streamlit UI with the milestone panel mid-run, showing one step done (green), one running (blue), rest pending -->
+## Usage
 
 ```bash
 streamlit run app_ui.py
 ```
+
+```bash
+python main.py --entities data/input/entities_plant_bioelectronics.csv
+python main.py --entities data/input/entities_plant_bioelectronics.csv --discover
+python main.py --entities ... --only "Vivent" --force-analyze      # one entity, fresh analysis
+python main.py --entities ... --report-only                         # rebuild report from cache
+python main.py --entities ... --skip-scrape                         # offline: cached pages only
+python main.py --entities ... --no-web-enrich                       # OpenAlex only, no search
+python main.py --entities ... --backend claude --model claude-opus-5-5
+```
+
+Run `python main.py --help` for every flag. Tests: `python -m pytest tests`.
 
 ---
 
@@ -131,39 +157,10 @@ streamlit run app_ui.py
 ```bash
 git clone https://github.com/leoturambar/competitive-intelligence.git
 cd competitive-intelligence
-
 conda create -n ci-tool python=3.11
 conda activate ci-tool
 pip install -r requirements.txt
-```
-
-The dependencies are `requests`, `beautifulsoup4`, and `streamlit`. If you use the Ollama backend, you need Ollama installed and running locally with `qwen2.5:14b` pulled. If you use the Claude backend, you need an Anthropic API key set in your environment.
-
----
-
-## Usage
-
-```bash
-# Run on a CSV topic file
-python main.py --entities data/input/entities_plant_bioelectronics.csv
-
-# With discovery enabled
-python main.py --entities data/input/entities_plant_bioelectronics.csv --discover
-
-# Use existing cache, skip scraping
-python main.py --skip-scrape
-
-# Skip enrichment (faster, less complete)
-python main.py --skip-enrich
-
-# Full fresh run, ignore all caches
-python main.py --force
-
-# Granular cache control
-python main.py --force-scrape --force-analyze
-
-# Re-run discovery only, keep everything else cached
-python main.py --discover --force-discover --skip-scrape
+ollama pull qwen3.5:9b        # for the local backend
 ```
 
 ---
@@ -172,27 +169,28 @@ python main.py --discover --force-discover --skip-scrape
 
 ```
 competitive-intelligence/
-├── config.py           # LLM backend, topic defaults, discovery queries and keywords
-├── csv_loader.py       # CSV parsing, save_discovered_to_csv()
-├── scraper.py          # Fetch and clean text from entity URLs
-├── analyzer.py         # LLM structured extraction per entity, Ollama + Claude backends
-├── enricher.py         # Three targeted DDG+LLM passes, Semantic Scholar link resolution
-├── discoverer.py       # Discovery: DDG → affiliation regex → keyword verification → LLM
-├── reporter.py         # Enriched JSON → self-contained HTML report
-├── main.py             # Pipeline orchestration, run_status.json, CLI argument handling
-├── app_ui.py           # Streamlit UI
-├── requirements.txt
-└── data/
-    └── input/          # Topic CSV files (one per landscape)
+├── config.py        # defaults: backend, models, topic, delays
+├── project.py       # Project model, per-project paths, fingerprinted cache, run status
+├── csv_loader.py    # robust CSV read/write, save discovered entities
+├── web.py           # HTTP session, rate limiting, HTML cleaning, search with fallback/circuit breaker
+├── llm.py           # Ollama + Claude backends, JSON-schema output, tolerant parsing
+├── openalex.py      # institution matching, topic activity, paper lookup, bibliometric discovery
+├── scraper.py       # homepage search, multi-page scraping
+├── analyzer.py      # schema-constrained extraction + normalisation
+├── enricher.py      # research profile, web intelligence, link resolution
+├── discoverer.py    # bibliometric + web-affiliation discovery, verification funnel
+├── landscape.py     # cross-entity statistics and synthesis
+├── reporter.py      # interactive HTML report + CSV/JSON exports
+├── main.py          # CLI and pipeline orchestration
+├── app_ui.py        # Streamlit app
+└── tests/           # offline unit tests
 ```
 
 ---
 
 ## Output quality
 
-Results vary by entity. Organisations with a rich public web presence — active lab pages, recent publications, a company site — tend to produce complete and reliable cards. Entities with minimal online footprint often have sparse fields, particularly for key people and notable outputs. All output should be reviewed before use. The tool accelerates the research process; it does not replace the domain expertise needed to interpret what the landscape means.
-
-The enrichment step is the one most sensitive to LLM quality. If you see hallucinated or vague enrichment results with Ollama, switching to Claude tends to fix it.
+Organisations with a rich public footprint produce complete, well-sourced profiles; thin ones are marked *thin evidence* in the report so you know where to add URLs or notes. OpenAlex matching is institution-level: for a lab inside a large university, the publication counts cover the whole university's papers *on the topic* (which is usually what you want, but worth knowing). LLM output can still be wrong — every profile lists its sources so claims can be checked. The tool accelerates the research; it does not replace the domain expertise needed to interpret it.
 
 ---
 

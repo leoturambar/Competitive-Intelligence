@@ -2,92 +2,51 @@
 #  COMPETITIVE INTELLIGENCE TOOL — discoverer.py
 # ─────────────────────────────────────────────
 #
-#  Pipeline:
-#    1. DDG search → raw text from papers + lab pages
-#    2. _regex_affiliations → extract candidate affiliation strings
-#    3. _verify_affiliation → DDG each candidate with topic keywords
-#         accept if DDG finds a page containing topic keywords
-#         reject otherwise (filters addresses, metadata, noise)
-#    4. LLM receives only verified affiliations → classifies + deduplicates
-#    5. Return new entity dicts for scrape_all()
+#  Finds organisations active on the topic that are not yet in the CSV.
+#  Two independent candidate sources feed one verification funnel:
 #
-#  Called from main.py when --discover flag is set.
+#   A. Bibliometric (OpenAlex)
+#        institutions with the most topic papers (title/abstract match),
+#        recent years weighted. Evidence = publication count + homepage.
+#
+#   B. Web affiliations (DDG + regex)          ← original pipeline, kept
+#        1. DDG search → raw text from papers + lab pages
+#        2. _regex_affiliations → density-window affiliation strings
+#        3. _verify_affiliation → DDG each candidate + topic keywords;
+#           the accepted page must NOT be an aggregator (journal, PubMed,
+#           ResearchGate…) and must mention the candidate's own name
+#
+#   Funnel (both sources):
+#        dedupe against known entities (name tokens + domain) →
+#        LLM relevance check (with evidence) → LLM naming/formatting
+#        (index-based: the model cannot invent names or URLs).
+#
+#  Every candidate and every decision is logged to
+#  data/projects/<slug>/discovery.json so the UI can show *why* something
+#  was kept or dropped and let the user accept / dismiss each one.
 # ─────────────────────────────────────────────
 
-import json
-import random
+from __future__ import annotations
+
 import re
-import time
-from pathlib import Path
-from urllib.parse import unquote
+from datetime import date, datetime
 
-import requests
-from bs4 import BeautifulSoup
+import openalex
+import web
+from analyzer import ENTITY_TYPES
+from llm import call_json, enum_of, nullable
+from project import Project, fingerprint, read_json, write_json
 
-from config import (
-    ENTITIES, TOPIC, TOPIC_DESCRIPTION,
-    REQUEST_TIMEOUT, REQUEST_DELAY, DDG_DELAY, MAX_TEXT_CHARS,
-    DISCOVERY_QUERIES, TOPIC_KEYWORDS,
-)
-from analyzer import _call_llm, _parse_json
-
-# ── Settings ──────────────────────────────────
-DISCOVERY_N_NEW      = 10   # max new entities to return
-DISCOVERY_N_QUERIES  = 5    # how many DDG queries to run
-DISCOVERY_PAGES_EACH = 6    # pages to fetch per query
-
-UA_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-]
+DISCOVERY_N_NEW        = 12   # max new entities to keep
+DISCOVERY_N_QUERIES    = 5    # DDG queries to run
+DISCOVERY_PAGES_EACH   = 6    # pages fetched per query
+MAX_REGEX_TO_VERIFY    = 25   # bound the slow DDG verification loop
+OPENALEX_CANDIDATES    = 30
+OPENALEX_MIN_WORKS     = 2
+OPENALEX_SKIP_TYPES    = {"funder"}
 
 
-# ── Network helpers ───────────────────────────
-
-def _ddg_links(query: str, max_results: int = DISCOVERY_PAGES_EACH) -> list:
-    url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-    headers = {"User-Agent": random.choice(UA_LIST)}
-    try:
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        links = []
-        for a in soup.select("a.result__a"):
-            href = a.get("href", "")
-            if "uddg=" in href:
-                try:
-                    href = unquote(href.split("uddg=")[1].split("&")[0])
-                except Exception:
-                    continue
-            if href.startswith("http"):
-                links.append(href)
-            if len(links) >= max_results:
-                break
-        time.sleep(DDG_DELAY)
-        return links
-    except Exception as e:
-        print(f"    [WARN] DDG query failed: {e}")
-        return []
-
-
-def _fetch_text(url: str, max_chars: int = 4000) -> str:
-    headers = {"User-Agent": random.choice(UA_LIST)}
-    try:
-        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header",
-                         "aside", "form", "noscript", "iframe", "svg"]):
-            tag.decompose()
-        text = soup.get_text(separator=" ")
-        return re.sub(r"\s+", " ", text).strip()[:max_chars]
-    except Exception as e:
-        print(f"    [WARN] Fetch failed {url}: {e}")
-        return ""
-
-
-# ── Affiliation extraction ────────────────────
+# ── Affiliation extraction (source B) ─────────
 
 def _regex_affiliations(text: str) -> list:
     """
@@ -119,7 +78,6 @@ def _regex_affiliations(text: str) -> list:
     end   = min(len(lines), best_start + window + 30)
     region = " ".join(lines[start:end])
 
-    # Extract lines matching affiliation patterns
     patterns = [
         r'\d+[\.\s]+([A-Z][^,\n]{5,80},\s*[A-Z][^,\n]{3,60})',
         r'[a-z][\.\s]+([A-Z][^,\n]{5,80},\s*[A-Z][^,\n]{3,60})',
@@ -127,8 +85,7 @@ def _regex_affiliations(text: str) -> list:
         r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+University[^,\n]{0,40}',
     ]
 
-    found = []
-    seen  = set()
+    found, seen = [], set()
     for pattern in patterns:
         for m in re.finditer(pattern, region):
             s = m.group(0).strip() if m.lastindex is None else m.group(1).strip()
@@ -136,389 +93,345 @@ def _regex_affiliations(text: str) -> list:
             if len(s) > 15 and s.lower() not in seen:
                 seen.add(s.lower())
                 found.append(s)
-
     return found[:30]
 
 
-# ── Verification step ─────────────────────────
+NOISE_PATTERNS = [
+    r"\d{3,}",                                   # postal codes, phone numbers
+    r"\b(Street|Avenue|Road|Boulevard|Lane|Drive|Way|Rd\.|Ave\.|Str\.|Strasse|Straße|Via|Rue)\b",
+    r"Find articles by", r"doi:", r"https?://", r"^\s*\d", r"@", r"©|copyright",
+    r"\b(Received|Accepted|Published|Abstract|Keywords|Correspondence)\b",
+]
+ORG_INDICATORS = [
+    "university", "universit", "institute", "laboratory", "lab ", "center", "centre",
+    "department", "college", "school", "hospital", "foundation", "agency", "gmbh",
+    "inc.", "corp", "ltd", "s.a.", "s.r.l", "polytechnic", "politecnico", "academy",
+]
 
-def _verify_affiliation(affiliation: str, topic: str) -> dict | None:
-    """
-    Verify that an affiliation string corresponds to a real organisation
-    working on the topic by searching DDG and checking page content.
 
-    Returns {"name", "url", "page_title", "page_snippet"} if verified, None otherwise.
-    """
-    # Quick pre-filter: reject obvious non-organisations
-    noise_patterns = [
-        r"\d{3,}",           # long numbers (postal codes, phone)
-        r"\b(Street|Avenue|Road|Boulevard|Lane|Drive|Way|Rd\.|Ave\.)\b",
-        r"Find articles by",
-        r"doi:",
-        r"https?://",
-        r"^\s*\d",           # starts with number
-    ]
-    for pat in noise_patterns:
-        if re.search(pat, affiliation, re.IGNORECASE):
-            return None
+def prefilter(affiliation: str) -> bool:
+    if any(re.search(p, affiliation, re.IGNORECASE) for p in NOISE_PATTERNS):
+        return False
+    return any(ind in affiliation.lower() for ind in ORG_INDICATORS)
 
-    # Must contain at least one organisation indicator
-    org_indicators = [
-        "university", "universit", "institute", "laboratory",
-        "lab ", "center", "centre", "department", "college",
-        "school", "hospital", "foundation", "agency", "gmbh",
-        "inc.", "corp", "ltd", "s.a.", "s.r.l",
-    ]
-    if not any(ind in affiliation.lower() for ind in org_indicators):
-        return None
 
-    # DDG verification search
-    query = f"{affiliation} {topic}"
+def _verify_affiliation(affiliation: str, project: Project) -> dict | None:
+    """DDG the candidate; accept the first non-aggregator page that mentions the
+    candidate's distinctive name words AND ≥2 topic keywords."""
     print(f"    [VERIFY] {affiliation[:60]}...")
-    links = _ddg_links(query, max_results=4)
-
-    for url in links:
-        headers = {"User-Agent": random.choice(UA_LIST)}
-        try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Build a rich naming hint from multiple signals
-            og_site = soup.find("meta", property="og:site_name")
-            h1_tag  = soup.find("h1")
-            ttl_tag = soup.find("title")
-            page_title = (
-                re.sub(r"\s+", " ", og_site["content"]).strip()[:100]
-                if og_site and og_site.get("content") else
-                re.sub(r"\s+", " ", h1_tag.get_text()).strip()[:100]
-                if h1_tag else
-                re.sub(r"\s+", " ", ttl_tag.get_text()).strip()[:100]
-                if ttl_tag else ""
-            )
-            # Strip noise, get text for keyword check and body snippet
-            for tag in soup(["script", "style", "nav", "footer", "header",
-                             "aside", "form", "noscript", "iframe", "svg"]):
-                tag.decompose()
-            text = re.sub(r"\s+", " ", soup.get_text(separator=" ")).strip()[:3000]
-            page_snippet = text[:300]
-        except Exception as e:
-            print(f"    [WARN] Fetch failed {url}: {e}")
-            time.sleep(REQUEST_DELAY)
+    tokens = web.name_tokens(affiliation)
+    for r in web.ddg_search(f"{web.shorten_query(affiliation, '', 5)} {project.topic}", max_results=5):
+        if web.is_aggregator(r.url):
             continue
-        if not text:
-            time.sleep(REQUEST_DELAY)
+        page = web.fetch(r.url)
+        if not page.ok or not page.text:
             continue
-        text_lower = text.lower()
-        keyword_hits = sum(1 for kw in TOPIC_KEYWORDS if kw.lower() in text_lower)
-        if keyword_hits >= 2:
-            print(f"             OK  ({keyword_hits} keyword hits) -> {url}")
-            return {"name": affiliation, "url": url,
-                    "page_title": page_title, "page_snippet": page_snippet}
-        time.sleep(REQUEST_DELAY)
-
+        hay = f"{page.title} {page.site_name} {page.text[:4000]}".lower()
+        name_hits = sum(1 for t in tokens if t in hay)
+        kw_hits = sum(1 for kw in project.keywords if kw.lower() in hay)
+        if tokens and name_hits >= max(1, (len(tokens) + 1) // 2) and kw_hits >= 2:
+            print(f"             OK  ({kw_hits} keyword hits, {name_hits}/{len(tokens)} name words) -> {r.url}")
+            return {"url": r.url, "page_title": page.name_hint[:100],
+                    "page_snippet": (page.description or page.text)[:300],
+                    "evidence": f"{kw_hits} topic keywords on {web.domain_of(r.url)}"}
     return None
 
 
-# ── Fallback query generation ─────────────────
+# ── Candidate sources ─────────────────────────
 
-def _generate_fallback_queries(used_queries: list) -> list:
-    prompt = f"""You are helping search for organisations working on "{TOPIC}".
+def _web_candidates(project: Project, known_urls: set, log) -> list[dict]:
+    page_texts, seen_urls = {}, set()
+    queries = project.queries[:DISCOVERY_N_QUERIES]
+    for query in queries:
+        log(f"DDG: {query}")
+        print(f"    Query: {query}")
+        for url in web.ddg_links(query, DISCOVERY_PAGES_EACH):
+            if url in seen_urls or url in known_urls:
+                continue
+            seen_urls.add(url)
+            text = web.fetch_text(url, max_chars=6000)
+            if text:
+                page_texts[url] = text
+                print(f"    -> {url}  ({len(text)} chars)")
 
-These search queries returned no results:
-{chr(10).join(f'- {q}' for q in used_queries)}
+    if not page_texts:
+        print("  [WARN] Initial queries returned nothing — trying fallback queries...")
+        for query in _fallback_queries(project, queries):
+            for url in web.ddg_links(query, DISCOVERY_PAGES_EACH):
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    text = web.fetch_text(url, max_chars=6000)
+                    if text:
+                        page_texts[url] = text
 
-Generate 3 alternative search queries (2-4 words each, different terminology).
+    raw, seen = [], set()
+    for url, text in page_texts.items():
+        for aff in _regex_affiliations(text):
+            if aff.lower() not in seen:
+                seen.add(aff.lower())
+                raw.append({"name": aff, "source": "web", "found_on": url})
+    print(f"  [DISCOVER] {len(raw)} affiliation strings extracted")
+    return raw
 
-Return ONLY: {{"queries": ["query 1", "query 2", "query 3"]}}
-No preamble, no markdown fences."""
+
+def _fallback_queries(project: Project, used: list) -> list:
+    prompt = (f'You are helping search for organisations working on "{project.topic}".\n'
+              f"These search queries returned no results:\n" + "\n".join(f"- {q}" for q in used) +
+              "\nGenerate 3 alternative search queries (2-4 words each, different terminology).")
     try:
-        raw  = _call_llm(prompt)
-        data = _parse_json(raw)
-        return data.get("queries", [])
+        data = call_json(prompt, schema={"type": "object", "properties": {
+            "queries": {"type": "array", "items": {"type": "string"}}}, "required": ["queries"]})
+        return [q for q in data.get("queries", []) if isinstance(q, str)][:3]
     except Exception:
         return []
 
 
-# ── Main function ─────────────────────────────
-
-def discover(force: bool = False, on_status=None) -> list:
-    """
-    Discover new entities relevant to TOPIC via DDG + affiliation verification.
-
-    Flow:
-      1. DDG searches collect raw text (papers, lab pages)
-      2. _regex_affiliations extracts candidate strings from each page
-      3. _verify_affiliation DDG-checks each candidate with topic keywords
-      4. LLM classifies verified affiliations into entity dicts
-      5. Deduplicate against known ENTITIES, cache, return
-
-    Results cached in data/discovered.json.
-    """
-    cache_path = Path("data/discovered.json")
-
-    if cache_path.exists() and not force:
-        print("  [CACHE] discovery results")
-        with open(cache_path) as f:
-            return json.load(f)
-
-    known_names = {e["name"].lower() for e in ENTITIES}
-    known_urls  = {url for e in ENTITIES for url in e.get("urls", [])}
-
-    # ── Step 1: collect text from DDG ─────────────────────
-    print("  [DISCOVER] Searching DuckDuckGo...")
-    page_texts = {}   # url -> text (keep source mapping)
-    seen_urls  = set()
-    used_queries = []
-
-    for query in DISCOVERY_QUERIES[:DISCOVERY_N_QUERIES]:
-        used_queries.append(query)
-        print(f"    Query: {query}")
-        links = _ddg_links(query)
-
-        if not links:
-            print("    -> no links")
+def _openalex_candidates(project: Project, log) -> list[dict]:
+    query = openalex.topic_query(project.topic, project.keywords)
+    log(f"OpenAlex: {query}")
+    print(f"  [DISCOVER] OpenAlex institutions publishing on '{query}'")
+    since = date.today().year - 8
+    out = []
+    for inst in openalex.top_institutions(query, n=OPENALEX_CANDIDATES, since_year=since):
+        if inst["topic_works"] < OPENALEX_MIN_WORKS or inst.get("type") in OPENALEX_SKIP_TYPES:
             continue
+        out.append({
+            "name": inst["name"], "source": "openalex", "url": inst.get("homepage_url"),
+            "openalex_id": inst["openalex_id"], "country": openalex.country_name(inst.get("country_code")),
+            "oa_type": inst.get("type"), "topic_works": inst["topic_works"],
+            "evidence": f"{inst['topic_works']} topic papers since {since} (OpenAlex)",
+        })
+    print(f"  [DISCOVER] {len(out)} OpenAlex candidates")
+    return out
 
-        for url in links:
-            if url in seen_urls or url in known_urls:
-                continue
-            seen_urls.add(url)
-            text = _fetch_text(url, max_chars=6000)
-            if text:
-                page_texts[url] = text
-                print(f"    -> {url}  ({len(text)} chars)")
-            time.sleep(REQUEST_DELAY)
 
-    # Fallback
-    if not page_texts:
-        print("  [WARN] Initial queries returned nothing — trying fallback...")
-        for query in _generate_fallback_queries(used_queries):
-            print(f"    Fallback: {query}")
-            for url in _ddg_links(query):
-                if url in seen_urls or url in known_urls:
-                    continue
-                seen_urls.add(url)
-                text = _fetch_text(url, max_chars=6000)
-                if text:
-                    page_texts[url] = text
-                time.sleep(REQUEST_DELAY)
+# ── Known-entity matching ─────────────────────
 
-    if not page_texts:
-        print("  [WARN] No text collected — skipping discovery")
-        return []
+def _matches_known(cand: dict, known: list[dict]) -> str | None:
+    ctoks = openalex._tokens(cand["name"])
+    cdom = web.domain_of(cand.get("url") or "")
+    for k in known:
+        ktoks = openalex._tokens(k["name"])
+        if ctoks and ktoks and (ctoks <= ktoks or ktoks <= ctoks):
+            return k["name"]
+        for u in k.get("urls") or []:
+            kd = web.domain_of(u)
+            if cdom and kd and cdom == kd and not web.is_aggregator(u):
+                return k["name"]
+    return None
 
-    # ── Step 2: extract affiliation candidates ─────────────
-    print("  [DISCOVER] Extracting affiliation candidates...")
-    candidates = []
-    seen_candidates = set()
 
-    for url, text in page_texts.items():
-        affiliations = _regex_affiliations(text)
-        for aff in affiliations:
-            if aff.lower() not in seen_candidates:
-                seen_candidates.add(aff.lower())
-                candidates.append(aff)
+# ── LLM funnel ────────────────────────────────
 
-    print(f"  [DISCOVER] {len(candidates)} candidates extracted")
+RELEVANCE_SCHEMA = {"type": "object", "properties": {"checks": {"type": "array", "items": {
+    "type": "object",
+    "properties": {"index": {"type": "integer"}, "relevant": {"type": "boolean"},
+                   "is_organization": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["index", "relevant", "is_organization", "reason"]}}}, "required": ["checks"]}
 
-    if on_status:
-        on_status("discovery", f"{len(candidates)} candidates, verifying...")
+FORMAT_SCHEMA = {"type": "object", "properties": {"entities": {"type": "array", "items": {
+    "type": "object",
+    "properties": {"index": {"type": "integer"}, "name": {"type": "string"},
+                   "entity_type": enum_of(ENTITY_TYPES), "notes": {"type": "string"},
+                   "country": nullable("string")},
+    "required": ["index", "name", "entity_type", "notes", "country"]}}}, "required": ["entities"]}
 
-    if not candidates:
-        print("  [WARN] No affiliation candidates found")
-        return []
 
-    # ── Step 3: verify each candidate ─────────────────────
-    print("  [DISCOVER] Verifying candidates via DDG...")
-    verified = []
+def _describe(c: dict) -> str:
+    bits = [c["name"]]
+    if c.get("url"):
+        bits.append(f"URL: {c['url']}")
+    if c.get("page_title"):
+        bits.append(f'page title: "{c["page_title"]}"')
+    if c.get("evidence"):
+        bits.append(f"evidence: {c['evidence']}")
+    if c.get("page_snippet"):
+        bits.append(f'text: "{c["page_snippet"][:200]}"')
+    return " | ".join(bits)
 
-    for i, candidate in enumerate(candidates):
-        # Skip if matches a known entity name
-        if any(known.lower() in candidate.lower() or
-               candidate.lower() in known.lower()
-               for known in known_names):
-            print(f"    [SKIP] already known: {candidate[:50]}")
-            continue
 
-        result = _verify_affiliation(candidate, TOPIC)
-        if on_status and i % 3 == 0:
-            on_status("discovery", f"verifying {i+1}/{len(candidates)}...")
-        if result:
-            # Skip if verified URL matches a known URL
-            if result["url"] in known_urls:
-                print(f"    [SKIP] URL already known")
-                continue
-            verified.append(result)
+def _relevance_check(project: Project, cands: list[dict]) -> None:
+    block = "\n".join(f"{i + 1}. {_describe(c)}" for i, c in enumerate(cands))
+    prompt = f"""You are an expert analyst in {project.topic}.
+Scope: {project.description or project.topic}
 
-    print(f"  [DISCOVER] {len(verified)} verified candidates")
+For each candidate below decide:
+- is_organization: is it a real organisation or research group (not an address, person, journal, funder or web page)?
+- relevant: does it work directly on "{project.topic}" (not merely adjacent)? Publication counts are strong evidence.
+- reason: one short line.
 
-    # Dedup by URL — same page found via different affiliation strings = same entity
-    seen_verified_urls: dict = {}
-    deduped = []
-    for v in verified:
-        if v["url"] not in seen_verified_urls:
-            seen_verified_urls[v["url"]] = v["name"]
-            deduped.append(v)
-        else:
-            print(f"  [DEDUP] {v['name'][:55]} → same URL as '{seen_verified_urls[v['url']][:40]}'")
-    if len(deduped) < len(verified):
-        print(f"  [DISCOVER] {len(deduped)} unique candidates after dedup")
-    verified = deduped
+Candidates:
+{block}
 
-    if not verified:
-        print("  [WARN] No candidates passed verification")
-        Path("data").mkdir(exist_ok=True)
-        with open(cache_path, "w") as f:
-            json.dump([], f)
-        return []
-
-    # ── Step 4a: LLM relevance check ──────────────────────
-    print("  [DISCOVER] Checking relevance with LLM...")
-
-    already_known  = "\n".join(f"- {e['name']}" for e in ENTITIES)
-    numbered_block = "\n".join(
-        f"{idx + 1}. {v['name']}  ({v['url']})"
-        for idx, v in enumerate(verified)
-    )
-
-    relevance_prompt = f"""You are an expert analyst in {TOPIC}.
-
-{TOPIC_DESCRIPTION}
-
-For each organisation below, decide whether it directly works on {TOPIC} —
-not just adjacent or tangentially related.
-Base your decision on what can reasonably be inferred from the name, URL,
-and the context description above.
-
-{numbered_block}
-
-Return ONLY:
-{{"checks": [
-  {{"index": 1, "relevant": true, "reason": "one line"}},
-  ...
-]}}
-One entry per organisation, same order. No preamble, no markdown fences."""
-
+Return one entry per candidate with its index."""
     try:
-        raw    = _call_llm(relevance_prompt)
-        data   = _parse_json(raw)
-        checks = data.get("checks", [])
+        checks = call_json(prompt, schema=RELEVANCE_SCHEMA, max_tokens=4000).get("checks", [])
     except Exception as e:
         print(f"  [ERROR] LLM relevance check failed: {e}")
         checks = []
-
-    # Filter by index; log every decision for debugging
-    relevant_verified = []
-    checked_indices   = set()
+    reviewed = set()
     for chk in checks:
-        idx    = chk.get("index", 0)
-        keep   = chk.get("relevant", False)
-        reason = chk.get("reason", "")
-        if 1 <= idx <= len(verified):
-            checked_indices.add(idx)
-            candidate = verified[idx - 1]
-            tag = "[KEEP]" if keep else "[DROP]"
-            print(f"  {tag} {candidate['name'][:60]}: {reason}")
-            if keep:
-                relevant_verified.append(candidate)
+        idx = chk.get("index", 0)
+        if 1 <= idx <= len(cands):
+            reviewed.add(idx)
+            c = cands[idx - 1]
+            keep = bool(chk.get("relevant")) and chk.get("is_organization", True) is not False
+            c["decision"] = "kept" if keep else "dropped: not relevant"
+            c["reason"] = chk.get("reason", "")
+            print(f"  [{'KEEP' if keep else 'DROP'}] {c['name'][:60]}: {c['reason']}")
+    for i, c in enumerate(cands, start=1):
+        if i not in reviewed:      # silently skipped by the model → keep, flagged
+            c["decision"], c["reason"] = "kept", "not reviewed by the model — included by default"
 
-    # Fallback: include any candidates the LLM silently skipped
-    for idx, candidate in enumerate(verified, start=1):
-        if idx not in checked_indices:
-            print(f"  [KEEP] {candidate['name'][:60]}: (not reviewed — included by default)")
-            relevant_verified.append(candidate)
 
-    print(f"  [DISCOVER] {len(relevant_verified)} / {len(verified)} passed relevance check")
+def _format(project: Project, cands: list[dict], known: list[dict]) -> None:
+    block = "\n".join(f"{i + 1}. {_describe(c)}" for i, c in enumerate(cands))
+    already = "\n".join(f"- {e['name']}" for e in known) or "(none)"
+    prompt = f"""You are an expert analyst in {project.topic}.
 
-    if not relevant_verified:
-        print("  [WARN] No candidates passed relevance check")
-        Path("data").mkdir(exist_ok=True)
-        with open(cache_path, "w") as f:
-            json.dump([], f)
-        return []
+Give each organisation below a clean official name (e.g. "Uppsala University — Plant Bioelectronics Group"
+when a specific group is evident, otherwise the institution name), its type, country if evident,
+and one sentence of notes on what it does on {project.topic}.
+Use only the information given. Do not include an entry that clearly duplicates an already-known entity.
 
-    # ── Step 4b: LLM formats relevant candidates ──────────
-    print("  [DISCOVER] Formatting with LLM...")
+Organisations:
+{block}
 
-    def _fmt_candidate(v: dict) -> str:
-        line = f"- {v['name']}  (URL: {v['url']}"
-        if v.get("page_title"):
-            line += f"  |  title: \"{v['page_title']}\""
-        if v.get("page_snippet"):
-            line += f"  |  text: \"{v['page_snippet'][:200]}\""
-        return line + ")"
-
-    candidate_block = "\n".join(_fmt_candidate(v) for v in relevant_verified)
-
-    format_prompt = f"""You are an expert analyst in {TOPIC}.
-
-Format the following verified and relevance-checked organisations as structured data.
-
-{candidate_block}
-
-Already known — exclude only if name clearly matches:
-{already_known}
-
-For each included entity return:
-- "name": clean official name (e.g. "Uppsala University — Plant Bioelectronics Group")
-- "url": the verified URL provided above
-- "entity_type": Company | Spinoff | Research Institute | University | Consortium | Other
-- "notes": 1 sentence on what they do on {TOPIC}
-
-Rules:
-- Only use names and URLs from the list above
-- Do NOT invent names or URLs
-- Include all unless clearly matching an already-known entity
-- If all are already known, return {{"new_entities": []}}
-
-Return ONLY:
-{{"new_entities": [
-  {{"name": "...", "url": "...", "entity_type": "...", "notes": "..."}},
-  ...
-]}}
-No preamble, no markdown fences."""
-
+Already known:
+{already}"""
     try:
-        raw          = _call_llm(format_prompt)
-        data         = _parse_json(raw)
-        raw_entities = data.get("new_entities", [])
+        rows = call_json(prompt, schema=FORMAT_SCHEMA, max_tokens=4000).get("entities", [])
     except Exception as e:
         print(f"  [ERROR] LLM formatting failed: {e}")
-        raw_entities = []
+        rows = []
+    formatted = set()
+    for r in rows:
+        idx = r.get("index", 0)
+        if 1 <= idx <= len(cands):
+            c = cands[idx - 1]
+            formatted.add(idx)
+            c["clean_name"] = (r.get("name") or c["name"]).strip()
+            c["entity_type"] = r.get("entity_type")
+            c["notes"] = r.get("notes", "")
+            c["country"] = c.get("country") or r.get("country")
+    for i, c in enumerate(cands, start=1):
+        if i not in formatted:
+            c["decision"], c["reason"] = "dropped: duplicate of known entity", "removed during formatting"
 
-    # ── Step 5: build final entity list ───────────────────
-    new_entities = []
-    for e in raw_entities:
-        name = (e.get("name") or "").strip()
-        url  = (e.get("url")  or "").strip()
 
-        if not name or name.lower() in known_names:
+# ── Main ──────────────────────────────────────
+
+def discover(project: Project, force: bool = False, on_status=None,
+             use_web: bool = True, use_openalex: bool = True) -> list[dict]:
+    """Return newly discovered entity dicts (status 'new'), cached per project."""
+    log = (lambda msg: on_status(msg)) if on_status else (lambda msg: None)
+    fp = fingerprint(project.topic, project.description, project.queries, project.keywords,
+                     use_web, use_openalex)
+    cached = read_json(project.discovery_path)
+
+    if cached and cached.get("_fp") == fp and not force:
+        print("  [CACHE] discovery results")
+        known = project.entities
+        fresh = [e for e in cached.get("entities", [])
+                 if e.get("status") == "new" and not _matches_known(e, known)]
+        return fresh
+
+    known = project.entities
+    known_urls = {u for e in known for u in e.get("urls", [])}
+    candidates: list[dict] = []
+
+    if use_openalex:
+        candidates += _openalex_candidates(project, log)
+
+    if use_web:
+        raw = _web_candidates(project, known_urls, log)
+        raw = [c for c in raw if prefilter(c["name"])]
+        log(f"verifying {min(len(raw), MAX_REGEX_TO_VERIFY)} web candidates")
+        for i, c in enumerate(raw[:MAX_REGEX_TO_VERIFY]):
+            if _matches_known(c, known) or _matches_known(c, candidates):
+                continue
+            if on_status and i % 3 == 0:
+                on_status(f"verifying {i + 1}/{min(len(raw), MAX_REGEX_TO_VERIFY)}")
+            v = _verify_affiliation(c["name"], project)
+            if v:
+                c.update(v)
+                candidates.append(c)
+            else:
+                c["decision"], c["reason"] = "dropped: not verified", "no matching non-aggregator page"
+                candidates.append(c)
+
+    # Known-entity and URL dedupe
+    seen_urls: dict[str, str] = {}
+    pool = []
+    for c in candidates:
+        if c.get("decision"):
             continue
+        hit = _matches_known(c, known)
+        if hit:
+            c["decision"], c["reason"] = "dropped: already known", f"matches '{hit}'"
+            continue
+        u = (c.get("url") or "").rstrip("/")
+        if u and u in seen_urls:
+            c["decision"], c["reason"] = "dropped: duplicate", f"same URL as '{seen_urls[u]}'"
+            continue
+        if u:
+            seen_urls[u] = c["name"]
+        pool.append(c)
+    # Most evidence first, so the cap keeps the strongest candidates
+    pool.sort(key=lambda c: -(c.get("topic_works") or 0))
+    pool = pool[:DISCOVERY_N_NEW * 3]
+    print(f"  [DISCOVER] {len(pool)} candidates for LLM review")
 
-        entity = {
-            "name":        name,
-            "urls":        [url] if url else [],
-            "notes":       e.get("notes", ""),
-            "_discovered": True,
-        }
-        new_entities.append(entity)
-        known_names.add(name.lower())
-        print(f"  [DISCOVER] Found: {name}")
+    if pool:
+        log(f"LLM relevance check on {len(pool)} candidates")
+        _relevance_check(project, pool)
+        kept = [c for c in pool if c.get("decision") == "kept"][:DISCOVERY_N_NEW * 2]
+        if kept:
+            log(f"naming {len(kept)} candidates")
+            _format(project, kept, known)
 
+    new_entities, taken = [], set()
+    for c in pool:
+        if c.get("decision") != "kept" or not c.get("clean_name"):
+            continue
+        name = c["clean_name"]
+        if name.lower() in taken or _matches_known({"name": name, "url": c.get("url")}, known):
+            c["decision"] = "dropped: already known"
+            continue
+        if len(new_entities) >= DISCOVERY_N_NEW:
+            c["decision"] = "dropped: over limit"
+            continue
+        taken.add(name.lower())
+        new_entities.append({
+            "name": name, "urls": [c["url"]] if c.get("url") else [],
+            "notes": c.get("notes", ""), "entity_type": c.get("entity_type"),
+            "country": c.get("country"), "source": c["source"], "evidence": c.get("evidence"),
+            "openalex_id": c.get("openalex_id"),
+            "reason": c.get("reason"), "status": "new", "_discovered": True,
+            "discovered_on": date.today().isoformat(),
+        })
+        print(f"  [DISCOVER] Found: {name}  ({c['source']})")
+
+    write_json(project.discovery_path, {
+        "_fp": fp, "ts": datetime.now().isoformat(timespec="seconds"),
+        "entities": new_entities,
+        "candidates": [{k: v for k, v in c.items() if k != "page_snippet"} for c in candidates],
+    })
     print(f"  [DISCOVER] {len(new_entities)} new entities identified")
-
-    Path("data").mkdir(exist_ok=True)
-    with open(cache_path, "w") as f:
-        json.dump(new_entities, f, indent=2)
-
     return new_entities
 
 
+def set_status(project: Project, name: str, status: str) -> None:
+    """Mark a discovered entity as new / accepted / dismissed (used by the UI)."""
+    data = read_json(project.discovery_path, {}) or {}
+    for e in data.get("entities", []):
+        if e["name"] == name:
+            e["status"] = status
+    write_json(project.discovery_path, data)
+
+
 if __name__ == "__main__":
-    results = discover(force=True)
-    print(f"\n{len(results)} new entities found:")
-    for e in results:
-        url = e["urls"][0] if e["urls"] else "—"
-        print(f"  {e['name']}")
-        print(f"    URL  : {url}")
-        print(f"    Notes: {e.get('notes', '')}")
+    import sys
+    proj = Project.from_csv(sys.argv[1]) if len(sys.argv) > 1 else Project.from_config()
+    for e in discover(proj, force=True):
+        print(f"  {e['name']}  {e['urls'][:1]}  — {e.get('evidence')}")
